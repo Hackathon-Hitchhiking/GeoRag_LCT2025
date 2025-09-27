@@ -1,0 +1,15 @@
+[project]
+name = "medical-multimodal-rag"
+version = "0.1.0"
+description = "Multimodal medical RAG service built on Haystack"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "asyncpg>=0.30.0",
+    "boto3>=1.40.35",
+    "fastapi>=0.116.2",
+    "pydantic>=2.11.9",
+    "pydantic-settings>=2.10.1",
+    "sqlalchemy[asyncio]>=2.0.43",
+    "uvicorn>=0.36.0",
+]
