@@ -1,49 +1,55 @@
-version: "3.9"
-
 services:
   app:
     build:
       context: .
-    image: api-service
+    image: georag-api
     depends_on:
       postgres:
-        condition: service_started
-      qdrant:
         condition: service_started
       s3:
         condition: service_started
       s3-init:
         condition: service_completed_successfully
-    env_file:
-      - .env
     environment:
-      DEV_MODE: "${DEV_MODE:-false}"
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      DEV_MODE: "${DEV_MODE:-true}"
+      LOG_LEVEL: "${LOG_LEVEL:-DEBUG}"
       ALLOWED_HOSTS: "${ALLOWED_HOSTS:-*}"
-      QDRANT_HOST: "${QDRANT_HOST:-qdrant}"
-      QDRANT_PORT: "${QDRANT_PORT:-6333}"
-      QDRANT_API_KEY: "${QDRANT_API_KEY:-}"
-      QDRANT_COLLECTION: "${QDRANT_COLLECTION:-medical_cases}"
-      QDRANT_DISTANCE: "${QDRANT_DISTANCE:-cosine}"
-      QDRANT_IMAGE_WEIGHT: "${QDRANT_IMAGE_WEIGHT:-0.4}"
-      DATABASE_DSN: "${DATABASE_DSN:-postgresql+asyncpg://postgres:postgres@postgres:5432/medical}"
+      DATABASE_DSN: "${DATABASE_DSN_DOCKER:-postgresql+asyncpg://postgres:postgres@postgres:5432/georag}"
       DATABASE_ECHO: "${DATABASE_ECHO:-false}"
-      S3_BUCKET: "${S3_BUCKET:-medical-cases}"
+      S3_BUCKET: "${S3_BUCKET:-geo-images}"
       S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-http://s3:9000}"
-      S3_REGION: "${S3_REGION:-us-east-1}"
-      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-minioadmin}"
-      S3_SECRET_KEY: "${S3_SECRET_KEY:-minioadmin}"
+      S3_REGION: "${S3_REGION:-ru-central1}"
+      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-localstack}"
+      S3_SECRET_KEY: "${S3_SECRET_KEY:-localstack}"
       S3_USE_SSL: "${S3_USE_SSL:-false}"
+      S3_IMAGES_PREFIX: "${S3_IMAGES_PREFIX:-images}"
+      S3_FEATURES_PREFIX: "${S3_FEATURES_PREFIX:-features/local}"
+      S3_GLOBAL_PREFIX: "${S3_GLOBAL_PREFIX:-features/global}"
+      FEATURE_MAX_KEYPOINTS: "${FEATURE_MAX_KEYPOINTS:-4096}"
+      LOCAL_FEATURE_TYPE: "${LOCAL_FEATURE_TYPE:-superpoint_max}"
+      GLOBAL_DESCRIPTOR_TYPE: "${GLOBAL_DESCRIPTOR_TYPE:-netvlad}"
+      MATCHER_TYPE: "${MATCHER_TYPE:-lightglue}"
+      RETRIEVAL_CANDIDATES: "${RETRIEVAL_CANDIDATES:-32}"
+      GLOBAL_SCORE_WEIGHT: "${GLOBAL_SCORE_WEIGHT:-0.35}"
+      LOCAL_SCORE_WEIGHT: "${LOCAL_SCORE_WEIGHT:-0.65}"
+      GEOMETRY_SCORE_WEIGHT: "${GEOMETRY_SCORE_WEIGHT:-0.25}"
+      MAX_SEARCH_RESULTS: "${MAX_SEARCH_RESULTS:-50}"
+      INDEX_REFRESH_INTERVAL: "${INDEX_REFRESH_INTERVAL:-7200}"
+      COMPUTE_DEVICE: "${COMPUTE_DEVICE:-}"
+      NOMINATIM_USER_AGENT: "${NOMINATIM_USER_AGENT:-GeoRAG/1.0 (+https://example.com)}"
+      NOMINATIM_TIMEOUT: "${NOMINATIM_TIMEOUT:-50}"
+      MAPILLARY_TOKEN: "${MAPILLARY_TOKEN:-}"
     ports:
       - "8000:8000"
     volumes:
-      - hf_models:/models
+      - nn_models:/models
+      - ./train_data:/app/train_data
 
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: "${POSTGRES_DB:-medical}"
+      POSTGRES_DB: "${POSTGRES_DB:-georag}"
       POSTGRES_USER: "${POSTGRES_USER:-postgres}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
     ports:
@@ -51,22 +57,13 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  qdrant:
-    image: qdrant/qdrant:v1.8.4
-    restart: unless-stopped
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-
   s3:
     image: minio/minio:latest
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: "${S3_ACCESS_KEY:-minioadmin}"
-      MINIO_ROOT_PASSWORD: "${S3_SECRET_KEY:-minioadmin}"
+      MINIO_ROOT_USER: "${S3_ACCESS_KEY:-localstack}"
+      MINIO_ROOT_PASSWORD: "${S3_SECRET_KEY:-localstack}"
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -80,9 +77,9 @@ services:
         condition: service_started
     environment:
       S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-http://s3:9000}"
-      S3_BUCKET: "${S3_BUCKET:-medical-cases}"
-      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-minioadmin}"
-      S3_SECRET_KEY: "${S3_SECRET_KEY:-minioadmin}"
+      S3_BUCKET: "${S3_BUCKET:-geo-images}"
+      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-localstack}"
+      S3_SECRET_KEY: "${S3_SECRET_KEY:-localstack}"
     entrypoint: >-
       /bin/sh -c "
       set -euo pipefail;
@@ -97,6 +94,5 @@ services:
 
 volumes:
   postgres_data:
-  qdrant_data:
-  hf_models:
+  nn_models:
   s3_data:
