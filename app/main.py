@@ -17,6 +17,7 @@ from .application.features import LocalFeatureSet, SuperPointFeatureExtractor
 from .application.geocoder import Geocoder
 from .application.global_descriptors import GlobalDescriptor, NetVLADGlobalExtractor
 from .application.ingestion import ImageIngestionService
+from .application.index import ImageFeatureIndex
 from .application.matcher import LightGlueMatcher
 from .application.search import ImageSearchService
 from .core.config import get_settings
@@ -43,7 +44,10 @@ async def lifespan(app: FastAPI):
         use_ssl=settings.s3_use_ssl,
     )
 
-    device = torch.device("cuda" if settings.prefer_gpu and torch.cuda.is_available() else "cpu")
+    if settings.compute_device:
+        device = torch.device(settings.compute_device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     local_store = FeatureStore[LocalFeatureSet](
         storage,
@@ -58,6 +62,12 @@ async def lifespan(app: FastAPI):
         deserializer=GlobalDescriptor.from_bytes,
     )
 
+    index = ImageFeatureIndex(
+        database=database,
+        local_store=local_store,
+        refresh_interval=float(getattr(settings, "index_refresh_interval", 7200)),
+    )
+
     local_extractor = SuperPointFeatureExtractor(
         device=device,
         max_keypoints=settings.feature_max_keypoints,
@@ -65,6 +75,8 @@ async def lifespan(app: FastAPI):
     global_extractor = NetVLADGlobalExtractor(device=device)
     matcher = LightGlueMatcher(device=device)
     geocoder = Geocoder(user_agent=settings.nominatim_user_agent, timeout=settings.nominatim_timeout)
+
+    await index.start()
 
     ingestion_service = ImageIngestionService(
         database=database,
@@ -78,14 +90,14 @@ async def lifespan(app: FastAPI):
         local_feature_type=settings.local_feature_type,
         global_descriptor_type=settings.global_descriptor_type,
         matcher_type=settings.matcher_type,
+        index=index,
     )
     search_service = ImageSearchService(
-        database=database,
         storage=storage,
-        local_store=local_store,
         local_extractor=local_extractor,
         global_extractor=global_extractor,
         matcher=matcher,
+        index=index,
         retrieval_candidates=settings.retrieval_candidates,
         global_weight=settings.global_score_weight,
         local_weight=settings.local_score_weight,
@@ -98,6 +110,7 @@ async def lifespan(app: FastAPI):
     app.state.storage = storage
     app.state.local_store = local_store
     app.state.global_store = global_store
+    app.state.index = index
     app.state.ingestion_service = ingestion_service
     app.state.search_service = search_service
     app.state.geocoder = geocoder
@@ -107,6 +120,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        try:
+            await index.stop()
+        except Exception as exc:  # pragma: no cover - вывод логов
+            LOG.exception("event=index_stop_failed error=%s", exc)
         try:
             await database.aclose()
         except Exception as exc:  # pragma: no cover - вывод логов

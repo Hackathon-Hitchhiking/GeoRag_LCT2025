@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, HTTPException, Request, status
 
 from ..application.exceptions import (
@@ -65,9 +67,16 @@ async def healthcheck() -> dict[str, str]:
 )
 async def add_image(request: Request, payload: ImageIngestRequest) -> ImageIngestResponse:
     """Загрузить новое изображение и сформировать его признаки."""
+    request_id = uuid.uuid4().hex
+    LOG.info(
+        "event=add_image_received request_id=%s has_metadata=%s",
+        request_id,
+        bool(payload.metadata),
+    )
     try:
         image_bytes = from_base64(payload.image_base64)
     except ValueError as exc:
+        LOG.warning("event=add_image_bad_input request_id=%s error=%s", request_id, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     ingestion_service = _get_ingestion_service(request)
@@ -84,15 +93,28 @@ async def add_image(request: Request, payload: ImageIngestRequest) -> ImageInges
     try:
         stored = await ingestion_service.ingest(ingestion_payload)
     except DuplicateImageError as exc:
-        LOG.info("event=image_duplicate")
+        LOG.info("event=image_duplicate request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except FeatureExtractionError as exc:
-        LOG.warning("event=feature_extraction_failed error=%s", exc)
+        LOG.warning(
+            "event=add_image_feature_failed request_id=%s error=%s",
+            request_id,
+            exc,
+        )
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except StorageError as exc:
-        LOG.error("event=storage_failed error=%s", exc)
+        LOG.error(
+            "event=add_image_storage_failed request_id=%s error=%s",
+            request_id,
+            exc,
+        )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
+    LOG.info(
+        "event=add_image_completed request_id=%s record_id=%s",
+        request_id,
+        stored.record_id,
+    )
     return ImageIngestResponse(
         id=stored.record_id,
         image_uri=storage.build_path(stored.image_key),
@@ -121,9 +143,21 @@ async def add_image(request: Request, payload: ImageIngestRequest) -> ImageInges
 )
 async def search_by_image(request: Request, payload: SearchRequest) -> SearchResponse:
     """Выполнить поиск по изображениям из базы."""
+    request_id = uuid.uuid4().hex
+    LOG.info(
+        "event=search_by_image_received request_id=%s top_k=%s plot_dots=%s",
+        request_id,
+        payload.top_k,
+        payload.plot_dots,
+    )
     try:
         query_bytes = from_base64(payload.image_base64)
     except ValueError as exc:
+        LOG.warning(
+            "event=search_by_image_bad_input request_id=%s error=%s",
+            request_id,
+            exc,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     search_service = _get_search_service(request)
@@ -136,8 +170,14 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
     try:
         result = await search_service.search_by_image(search_payload)
     except EmptyDatabaseError as exc:
+        LOG.info("event=search_by_image_empty_db request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except FeatureExtractionError as exc:
+        LOG.warning(
+            "event=search_by_image_feature_failed request_id=%s error=%s",
+            request_id,
+            exc,
+        )
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     query_image_bytes = result.query_bytes
@@ -169,15 +209,21 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
-                metadata=match.record.metadata,
+                metadata=match.record.metadata_json,
                 image_base64=to_base64(image_bytes),
             )
         )
 
-    return SearchResponse(
+    response = SearchResponse(
         query_image_base64=to_base64(query_image_bytes),
         matches=matches,
     )
+    LOG.info(
+        "event=search_by_image_completed request_id=%s matches=%s",
+        request_id,
+        len(matches),
+    )
+    return response
 
 
 @router.post(
@@ -190,6 +236,14 @@ async def search_by_coordinates(
 ) -> LocationSearchResponse:
     """Вернуть снимки поблизости от заданных координат."""
 
+    request_id = uuid.uuid4().hex
+    LOG.info(
+        "event=search_by_coordinates_received request_id=%s lat=%.6f lon=%.6f top_k=%s",
+        request_id,
+        payload.latitude,
+        payload.longitude,
+        payload.top_k,
+    )
     search_service = _get_search_service(request)
     search_payload = CoordinateSearchPayload(
         latitude=payload.latitude,
@@ -201,6 +255,7 @@ async def search_by_coordinates(
     try:
         result = await search_service.search_by_coordinates(search_payload)
     except EmptyDatabaseError as exc:
+        LOG.info("event=search_by_coordinates_empty_db request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     storage = getattr(request.app.state, "storage")
@@ -220,12 +275,18 @@ async def search_by_coordinates(
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
-                metadata=match.record.metadata,
+                metadata=match.record.metadata_json,
                 image_base64=to_base64(image_bytes),
             )
         )
 
-    return LocationSearchResponse(matches=matches)
+    response = LocationSearchResponse(matches=matches)
+    LOG.info(
+        "event=search_by_coordinates_completed request_id=%s matches=%s",
+        request_id,
+        len(matches),
+    )
+    return response
 
 
 @router.post(
@@ -238,6 +299,13 @@ async def search_by_address(
 ) -> LocationSearchResponse:
     """Вернуть снимки поблизости от указанного адреса."""
 
+    request_id = uuid.uuid4().hex
+    LOG.info(
+        "event=search_by_address_received request_id=%s address=%s top_k=%s",
+        request_id,
+        payload.address,
+        payload.top_k,
+    )
     search_service = _get_search_service(request)
     search_payload = AddressSearchPayload(
         address=payload.address,
@@ -248,8 +316,14 @@ async def search_by_address(
     try:
         result = await search_service.search_by_address(search_payload)
     except GeocodingError as exc:
+        LOG.warning(
+            "event=search_by_address_geocoding_failed request_id=%s error=%s",
+            request_id,
+            exc,
+        )
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except EmptyDatabaseError as exc:
+        LOG.info("event=search_by_address_empty_db request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     storage = getattr(request.app.state, "storage")
@@ -269,9 +343,15 @@ async def search_by_address(
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
-                metadata=match.record.metadata,
+                metadata=match.record.metadata_json,
                 image_base64=to_base64(image_bytes),
             )
         )
 
-    return LocationSearchResponse(matches=matches)
+    response = LocationSearchResponse(matches=matches)
+    LOG.info(
+        "event=search_by_address_completed request_id=%s matches=%s",
+        request_id,
+        len(matches),
+    )
+    return response

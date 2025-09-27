@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import torchvision.models as models
 from scipy.io import loadmat
 
+from ..logging import get_logger
 from ..utils.image import ensure_supported_size
 from .exceptions import FeatureExtractionError
 
@@ -164,6 +165,10 @@ class NetVLADGlobalExtractor:
         self._device = device
         self._model_name = model_name
         self._network = NetVLADBackbone(model_name).to(device).eval()
+        self._log = get_logger("georag.global")
+        self._log.info(
+            "event=netvlad_init model=%s device=%s", self._model_name, device
+        )
 
     def extract(self, image_bgr: np.ndarray) -> GlobalDescriptor:
         """Получить глобальный дескриптор из изображения."""
@@ -177,8 +182,14 @@ class NetVLADGlobalExtractor:
             with torch.inference_mode():
                 descriptor = self._network(tensor)
         except Exception as exc:  # pragma: no cover - исключения PyTorch
+            self._log.exception("event=netvlad_forward_failed model=%s", self._model_name)
             raise FeatureExtractionError("Ошибка при расчёте глобального дескриптора") from exc
         vector = descriptor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+        self._log.debug(
+            "event=netvlad_descriptor_ready dimension=%s norm=%.6f",
+            vector.size,
+            float(np.linalg.norm(vector)),
+        )
         return GlobalDescriptor(vector=vector)
 
     async def aextract(self, image_bgr: np.ndarray) -> GlobalDescriptor:

@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
+import heapq
 import math
 from dataclasses import dataclass
 
-import numpy as np
-
 from ..infrastructure.database.models import ImageRecord
-from ..infrastructure.database.repositories import ImageRepository
-from ..infrastructure.database.session import Database
 from ..infrastructure.storage.s3 import S3Storage
+from ..logging import get_logger
 from ..utils.image import decode_image, draw_keypoints, encode_image
 from .exceptions import EmptyDatabaseError, FeatureExtractionError, GeocodingError
-from .feature_store import FeatureStore, StoredFeature
 from .features import LocalFeatureSet, SuperPointFeatureExtractor
 from .geocoder import Geocoder
 from .global_descriptors import GlobalDescriptor, NetVLADGlobalExtractor
+from .index import CachedImageEntry, ImageFeatureIndex
 from .matcher import LightGlueMatcher, MatchScore
 
 
@@ -93,12 +91,11 @@ class ImageSearchService:
     def __init__(
         self,
         *,
-        database: Database,
         storage: S3Storage,
-        local_store: FeatureStore[LocalFeatureSet],
         local_extractor: SuperPointFeatureExtractor,
         global_extractor: NetVLADGlobalExtractor,
         matcher: LightGlueMatcher,
+        index: ImageFeatureIndex,
         retrieval_candidates: int,
         global_weight: float,
         local_weight: float,
@@ -106,12 +103,11 @@ class ImageSearchService:
         geometry_weight: float,
         geocoder: Geocoder,
     ) -> None:
-        self._database = database
         self._storage = storage
-        self._local_store = local_store
         self._local_extractor = local_extractor
         self._global_extractor = global_extractor
         self._matcher = matcher
+        self._index = index
         self._retrieval_candidates = max(1, retrieval_candidates)
         self._global_weight = max(0.0, global_weight)
         self._local_weight = max(0.0, local_weight)
@@ -127,9 +123,24 @@ class ImageSearchService:
         self._local_weight /= weight_norm
         self._geometry_weight /= weight_norm
         self._max_results = max(1, max_results)
+        self._log = get_logger("georag.search")
+        self._log.info(
+            "event=search_service_init retrieval=%s global_w=%.3f local_w=%.3f geometry_w=%.3f max_results=%s",
+            self._retrieval_candidates,
+            self._global_weight,
+            self._local_weight,
+            self._geometry_weight,
+            self._max_results,
+        )
 
     async def search_by_image(self, payload: SearchPayload) -> SearchResult:
         """Выполнить поиск и вернуть лучшие совпадения."""
+        self._log.info(
+            "event=search_image_started top_k=%s plot_dots=%s size_bytes=%s",
+            payload.top_k,
+            payload.plot_dots,
+            len(payload.data),
+        )
         query_image = decode_image(payload.data)
         try:
             query_local = await self._local_extractor.aextract(query_image)
@@ -139,17 +150,25 @@ class ImageSearchService:
         except Exception as exc:  # pragma: no cover - изоляция ошибок PyTorch/OpenCV
             raise FeatureExtractionError("Ошибка извлечения признаков запроса") from exc
 
+        self._log.debug(
+            "event=query_features_extracted keypoints=%s descriptor_dim=%s",
+            query_local.keypoints_count,
+            query_local.descriptor_dim,
+        )
+
         query_descriptor = query_global.normalized()
 
-        async with self._database.session() as session:
-            repo = ImageRepository(session)
-            total = await repo.count()
-            if total == 0:
-                raise EmptyDatabaseError("В базе отсутствуют изображения")
-            records = list(await repo.list_all())
-
-        scored = self._score_by_global(records, query_descriptor)
+        score_limit = max(
+            self._retrieval_candidates, payload.top_k, self._max_results
+        )
+        scored = await self._index.score_by_global(
+            query_descriptor, limit=score_limit
+        )
         if not scored:
+            entries_snapshot = await self._index.get_entries()
+            if not entries_snapshot:
+                raise EmptyDatabaseError("В базе отсутствуют изображения")
+            self._log.info("event=no_similar_images_found")
             return SearchResult(
                 query_bytes=payload.data,
                 query_local=query_local,
@@ -157,49 +176,106 @@ class ImageSearchService:
                 matches=[],
             )
 
-        candidate_limit = min(
-            len(scored),
-            max(self._retrieval_candidates, payload.top_k),
-            self._max_results,
-        )
+        candidate_limit = min(len(scored), score_limit)
         candidates = scored[:candidate_limit]
 
-        matches: list[SearchMatchResult] = []
-        for record, global_score in candidates:
-            stored: StoredFeature[LocalFeatureSet] = await self._local_store.load(record.feature_key)
-            candidate_features = stored.pack
+        self._log.debug(
+            "event=candidates_selected count=%s global_scores_sample=%s",
+            len(candidates),
+            [round(score, 4) for _, score in candidates[:5]],
+        )
+
+        best_heap: list[tuple[float, CachedImageEntry, MatchScore, float]] = []
+        evaluated = 0
+        for entry, global_score in candidates:
+            record = entry.record
+            if payload.top_k > 0 and len(best_heap) >= payload.top_k:
+                min_conf = best_heap[0][0]
+                max_possible = (
+                    self._global_weight * global_score
+                    + self._local_weight
+                    + self._geometry_weight
+                )
+                if max_possible <= min_conf + 1e-6:
+                    self._log.debug(
+                        "event=search_pruned_by_upper_bound record_id=%s max_possible=%.4f threshold=%.4f",
+                        record.id,
+                        max_possible,
+                        min_conf,
+                    )
+                    break
+
+            self._log.debug(
+                "event=match_candidate record_id=%s image_key=%s global_score=%.4f",
+                record.id,
+                record.image_key,
+                global_score,
+            )
+            candidate_features = entry.local_features
             match_score = await self._matcher.amatch(query_local, candidate_features)
             confidence = self._aggregate_scores(global_score, match_score)
+            self._log.debug(
+                "event=match_scores record_id=%s matches=%s mean_score=%.4f confidence=%.4f",
+                record.id,
+                match_score.matches,
+                match_score.mean_score,
+                confidence,
+            )
             if match_score.matches == 0:
+                self._log.debug(
+                    "event=match_rejected reason=no_local_matches record_id=%s",
+                    record.id,
+                )
                 continue
+            evaluated += 1
+            if payload.top_k == 0:
+                continue
+            if len(best_heap) < payload.top_k:
+                heapq.heappush(best_heap, (confidence, entry, match_score, global_score))
+            elif confidence > best_heap[0][0] + 1e-9:
+                heapq.heapreplace(best_heap, (confidence, entry, match_score, global_score))
+
+        if payload.top_k > 0 and not best_heap:
+            self._log.info("event=no_matches_after_local_filter")
+            return SearchResult(
+                query_bytes=payload.data,
+                query_local=query_local,
+                query_global=query_global,
+                matches=[],
+            )
+
+        selected = (
+            sorted(best_heap, key=lambda item: item[0], reverse=True)
+            if payload.top_k > 0
+            else []
+        )
+
+        matches: list[SearchMatchResult] = []
+        for confidence, entry, match_score, global_score in selected:
+            record = entry.record
             image_bytes = await self._storage.download(record.image_key)
             matches.append(
                 SearchMatchResult(
                     record=record,
                     image_bytes=image_bytes,
-                    local_features=candidate_features,
+                    local_features=entry.local_features,
                     match_score=match_score,
                     global_similarity=global_score,
                     confidence=confidence,
                 )
             )
 
-        if not matches:
-            return SearchResult(
-                query_bytes=payload.data,
-                query_local=query_local,
-                query_global=query_global,
-                matches=[],
-            )
-
-        matches.sort(key=lambda m: m.confidence, reverse=True)
-        top_matches = matches[: payload.top_k]
+        self._log.info(
+            "event=search_image_completed matches_evaluated=%s matches_returned=%s",
+            evaluated,
+            len(matches),
+        )
 
         return SearchResult(
             query_bytes=payload.data,
             query_local=query_local,
             query_global=query_global,
-            matches=top_matches,
+            matches=matches,
         )
 
     async def search_by_coordinates(
@@ -207,21 +283,19 @@ class ImageSearchService:
     ) -> LocationSearchResult:
         """Найти ближайшие изображения относительно координат."""
 
-        async with self._database.session() as session:
-            repo = ImageRepository(session)
-            total = await repo.count()
-            if total == 0:
-                raise EmptyDatabaseError("В базе отсутствуют изображения")
-            records = list(await repo.list_all())
+        entries = await self._index.get_entries()
+        if not entries:
+            raise EmptyDatabaseError("В базе отсутствуют изображения")
 
-        scored: list[tuple[ImageRecord, float]] = []
-        for record in records:
+        scored: list[tuple[CachedImageEntry, float]] = []
+        for entry in entries:
+            record = entry.record
             if record.latitude is None or record.longitude is None:
                 continue
             distance = self._haversine(
                 payload.latitude, payload.longitude, record.latitude, record.longitude
             )
-            scored.append((record, distance))
+            scored.append((entry, distance))
 
         if not scored:
             return LocationSearchResult(matches=[])
@@ -230,12 +304,12 @@ class ImageSearchService:
         top_records = scored[: payload.top_k]
 
         matches: list[LocationMatchResult] = []
-        for record, distance in top_records:
+        for entry, distance in top_records:
+            record = entry.record
             image_bytes = await self._storage.download(record.image_key)
             local_features: LocalFeatureSet | None = None
             if payload.plot_dots:
-                stored = await self._local_store.load(record.feature_key)
-                local_features = stored.pack
+                local_features = entry.local_features
             matches.append(
                 LocationMatchResult(
                     record=record,
@@ -262,36 +336,6 @@ class ImageSearchService:
                 top_k=payload.top_k,
             )
         )
-
-    def _score_by_global(
-        self, records: list[ImageRecord], query_descriptor: np.ndarray
-    ) -> list[tuple[ImageRecord, float]]:
-        """Отсортировать записи по глобальному сходству."""
-        query_descriptor = query_descriptor.astype(np.float32, copy=False)
-
-        vectors: list[np.ndarray] = []
-        valid_records: list[ImageRecord] = []
-        expected_dim = int(query_descriptor.shape[0])
-        for record in records:
-            raw_descriptor = record.global_descriptor
-            if not raw_descriptor:
-                continue
-            candidate = np.frombuffer(raw_descriptor, dtype=np.float32)
-            if candidate.size != expected_dim or candidate.size == 0:
-                continue
-            vectors.append(candidate)
-            valid_records.append(record)
-
-        if not vectors:
-            return []
-
-        matrix = np.stack(vectors).astype(np.float32, copy=False)
-        similarities = matrix @ query_descriptor
-        similarities = np.clip(similarities, -1.0, 1.0)
-
-        scored = list(zip(valid_records, similarities.tolist()))
-        scored.sort(key=lambda item: item[1], reverse=True)
-        return scored
 
     def _aggregate_scores(self, global_score: float, match_score: MatchScore) -> float:
         """Комбинировать все уровни оценки из пайплайна HLOC."""

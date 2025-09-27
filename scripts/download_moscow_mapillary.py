@@ -60,6 +60,18 @@ def download_image(client: httpx.Client, url: str, path: Path) -> None:
     path.write_bytes(response.content)
 
 
+def _extract_nested_id(value: Any) -> str | None:
+    """Вернуть идентификатор из объекта или строки."""
+
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get("id")
+    if isinstance(value, str):
+        return value or None
+    return None
+
+
 def build_metadata(item: dict[str, Any], relative_path: str) -> dict[str, Any]:
     """Сформировать запись метаданных для ingestion."""
 
@@ -72,8 +84,8 @@ def build_metadata(item: dict[str, Any], relative_path: str) -> dict[str, Any]:
         "longitude": longitude,
         "captured_at": item.get("captured_at"),
         "compass_angle": item.get("compass_angle"),
-        "sequence_id": (item.get("sequence") or {}).get("id"),
-        "creator_id": (item.get("creator") or {}).get("id"),
+        "sequence_id": _extract_nested_id(item.get("sequence")),
+        "creator_id": _extract_nested_id(item.get("creator")),
     }
     return metadata
 

@@ -22,6 +22,43 @@ from app.infrastructure.storage.s3 import S3Storage
 
 LOG = logging.getLogger("georag.ingest")
 
+ALLOWED_METADATA_KEYS = {
+    "speed",
+    "angle",
+    "create_timestamp",
+    "device",
+    "camera",
+}
+
+
+def normalize_metadata_dict(
+    source: dict[str, Any] | None, *, strict: bool = False
+) -> dict[str, Any] | None:
+    """Нормализовать имена и (опционально) отфильтровать поля."""
+
+    if not source:
+        return None
+
+    metadata = dict(source)
+
+    angle = metadata.pop("angle", None)
+    if angle is None and "compass_angle" in metadata:
+        angle = metadata.pop("compass_angle")
+
+    create_ts = metadata.pop("create_timestamp", None)
+    if create_ts is None and "captured_at" in metadata:
+        create_ts = metadata.pop("captured_at")
+
+    if angle is not None:
+        metadata["angle"] = angle
+    if create_ts is not None:
+        metadata["create_timestamp"] = create_ts
+
+    if strict:
+        metadata = {k: v for k, v in metadata.items() if k in ALLOWED_METADATA_KEYS}
+
+    return metadata or None
+
 
 def iter_images(data_dir: Path) -> list[Path]:
     supported = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -31,26 +68,73 @@ def iter_images(data_dir: Path) -> list[Path]:
 def load_manifest(data_dir: Path) -> dict[str, dict[str, Any]]:
     """Загрузить объединённый манифест по изображениям.
 
-    Поддерживаются `metadata.jsonl` и `manifest.jsonl`, каждая строка которых
-    описывает одно изображение с обязательным полем `filename` (относительный
-    путь от корня каталога) и произвольными дополнительными атрибутами.
+    Поддерживаются `metadata.jsonl`, `manifest.jsonl` и `metadata.json`.
     """
 
     manifest: dict[str, dict[str, Any]] = {}
     for name in ("metadata.jsonl", "manifest.jsonl"):
-        path = data_dir / name
-        if not path.exists():
+        for path in data_dir.rglob(name):
+            if not path.is_file():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                payload = json.loads(line)
+                filename = payload.get("filename")
+                if not filename:
+                    continue
+                key = Path(filename).as_posix()
+                manifest[key] = payload
+
+    for json_path in data_dir.rglob("metadata.json"):
+        if not json_path.is_file():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        results = data.get("results")
+        if not isinstance(results, list):
+            continue
+        base_dir = json_path.parent
+        for item in results:
+            if not isinstance(item, dict):
                 continue
-            payload = json.loads(line)
-            filename = payload.get("filename")
-            if not filename:
+            image_id = item.get("id")
+            if not image_id:
                 continue
-            key = Path(filename).as_posix()
-            manifest[key] = payload
+            relative_dir = base_dir.relative_to(data_dir)
+            image_path = None
+            for ext in (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"):
+                candidate = base_dir / f"{image_id}{ext}"
+                if candidate.exists():
+                    image_path = candidate.relative_to(data_dir).as_posix()
+                    break
+            if image_path is None:
+                if relative_dir == Path('.'):
+                    image_path = f"{image_id}.jpg"
+                else:
+                    image_path = f"{relative_dir.as_posix()}/{image_id}.jpg"
+
+            entry = {
+                "filename": image_path,
+                "latitude": item.get("latitude"),
+                "longitude": item.get("longitude"),
+            }
+            meta_raw = {
+                "speed": item.get("speed"),
+                "angle": item.get("angle"),
+                "compass_angle": item.get("compass_angle"),
+                "create_timestamp": item.get("create_timestamp"),
+                "captured_at": item.get("captured_at"),
+                "device": item.get("device"),
+                "camera": item.get("camera"),
+            }
+            normalized = normalize_metadata_dict(meta_raw, strict=True)
+            if normalized:
+                entry.update(normalized)
+            manifest[image_path] = entry
     return manifest
 
 
@@ -65,10 +149,11 @@ def load_sidecar_metadata(image_path: Path) -> tuple[dict[str, Any] | None, floa
     for meta_path in candidates:
         if not meta_path.exists():
             continue
-        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-        latitude = metadata.pop("latitude", None)
-        longitude = metadata.pop("longitude", None)
-        return metadata or None, latitude, longitude
+        metadata_raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        latitude = metadata_raw.pop("latitude", None)
+        longitude = metadata_raw.pop("longitude", None)
+        metadata = normalize_metadata_dict(metadata_raw)
+        return metadata, latitude, longitude
     return None, None, None
 
 
@@ -81,18 +166,22 @@ def compose_metadata(
 
     relative_key = image_path.relative_to(data_dir).as_posix()
     manifest_entry = manifest.get(relative_key) or manifest.get(image_path.name)
-    manifest_meta: dict[str, Any] = {}
     latitude: float | None = None
     longitude: float | None = None
+    manifest_meta: dict[str, Any] = {}
     if manifest_entry:
-        manifest_meta = {
+        manifest_meta_raw = {
             k: v for k, v in manifest_entry.items() if k not in {"filename", "latitude", "longitude"}
         }
+        manifest_meta = normalize_metadata_dict(manifest_meta_raw) or {}
         latitude = manifest_entry.get("latitude")
         longitude = manifest_entry.get("longitude")
-
+    
     sidecar_meta, sidecar_lat, sidecar_lon = load_sidecar_metadata(image_path)
-    metadata = {**manifest_meta, **(sidecar_meta or {})} if manifest_meta or sidecar_meta else None
+    combined_meta = {**manifest_meta} if manifest_meta else {}
+    if sidecar_meta:
+        combined_meta.update(sidecar_meta)
+    metadata = combined_meta or None
     latitude = sidecar_lat if sidecar_lat is not None else latitude
     longitude = sidecar_lon if sidecar_lon is not None else longitude
     return metadata, latitude, longitude

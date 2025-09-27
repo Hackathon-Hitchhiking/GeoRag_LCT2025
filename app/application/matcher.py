@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from lightglue import LightGlue
 
+from ..logging import get_logger
 from .features import LocalFeatureSet
 
 
@@ -53,6 +54,8 @@ class LightGlueMatcher:
     def __init__(self, *, device: torch.device) -> None:
         self._device = device
         self._matcher = LightGlue(features="superpoint").to(device).eval()
+        self._log = get_logger("georag.matcher")
+        self._log.info("event=lightglue_init device=%s", device)
 
     def match(self, query: LocalFeatureSet, candidate: LocalFeatureSet) -> MatchScore:
         """Вычислить сопоставление двух наборов признаков."""
@@ -72,6 +75,11 @@ class LightGlueMatcher:
             "image0": query.to_lightglue_inputs(self._device),
             "image1": candidate.to_lightglue_inputs(self._device),
         }
+        self._log.debug(
+            "event=lightglue_match_start query_points=%s candidate_points=%s",
+            query.keypoints_count,
+            candidate.keypoints_count,
+        )
         with torch.inference_mode():
             matches = self._matcher(inputs)
 
@@ -79,6 +87,7 @@ class LightGlueMatcher:
         scores0 = matches["matching_scores0"][0]
         valid = matches0 > -1
         matched = int(valid.sum().item())
+        self._log.debug("event=lightglue_match_result matches=%s", matched)
         if matched == 0:
             return MatchScore(
                 matches=0,
@@ -120,6 +129,12 @@ class LightGlueMatcher:
                         geometric_score = float(
                             np.clip(float(np.mean(inlier_scores)), 0.0, 1.0)
                         ) * inlier_ratio
+                        self._log.debug(
+                            "event=lightglue_geometry inliers=%s ratio=%.4f score=%.4f",
+                            inliers,
+                            inlier_ratio,
+                            geometric_score,
+                        )
 
         return MatchScore(
             matches=matched,

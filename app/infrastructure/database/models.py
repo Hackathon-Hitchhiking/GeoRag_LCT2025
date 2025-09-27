@@ -43,7 +43,9 @@ class ImageRecord(TimestampMixin, Base):
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     address: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(
+        "metadata", JSONB, nullable=True
+    )
     image_hash: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     descriptor_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     descriptor_dim: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

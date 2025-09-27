@@ -13,12 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..infrastructure.database.repositories import ImageRepository
 from ..infrastructure.database.session import Database
 from ..infrastructure.storage.s3 import S3Storage
+from ..logging import get_logger
 from ..utils.image import decode_image, detect_extension
 from .exceptions import DuplicateImageError, FeatureExtractionError, StorageError
 from .feature_store import FeatureStore
 from .features import LocalFeatureSet, SuperPointFeatureExtractor
 from .geocoder import Geocoder
 from .global_descriptors import GlobalDescriptor, NetVLADGlobalExtractor
+from .index import ImageFeatureIndex
 
 
 @dataclass(slots=True)
@@ -72,6 +74,7 @@ class ImageIngestionService:
         local_feature_type: str,
         global_descriptor_type: str,
         matcher_type: str,
+        index: ImageFeatureIndex | None = None,
     ) -> None:
         self._database = database
         self._storage = storage
@@ -84,17 +87,28 @@ class ImageIngestionService:
         self._local_feature_type = local_feature_type
         self._global_descriptor_type = global_descriptor_type
         self._matcher_type = matcher_type
+        self._log = get_logger("georag.ingestion")
+        self._index = index
 
     async def ingest(self, payload: IngestionPayload) -> StoredImage:
         """Добавить изображение в базу и вернуть описание."""
         digest = hashlib.sha256(payload.data).hexdigest()
+        self._log.info("event=ingest_started digest=%s size_bytes=%s", digest[:16], len(payload.data))
         async with self._database.session() as session:
             repo = ImageRepository(session)
             existing = await repo.find_by_hash(digest)
             if existing is not None:
+                self._log.info(
+                    "event=ingest_duplicate digest=%s existing_id=%s",
+                    digest[:16],
+                    existing.id,
+                )
                 raise DuplicateImageError("Изображение уже было загружено")
             record = await self._persist(payload, digest, session)
             await session.commit()
+        if self._index is not None:
+            await self._index.request_refresh()
+        self._log.info("event=ingest_completed record_id=%s digest=%s", record.record_id, digest[:16])
         return record
 
     async def _persist(
@@ -104,9 +118,17 @@ class ImageIngestionService:
         try:
             local_features = await self._local_extractor.aextract(image)
             global_descriptor = await self._global_extractor.aextract(image)
+            self._log.debug(
+                "event=features_extracted digest=%s keypoints=%s descriptor_dim=%s",
+                digest[:16],
+                local_features.keypoints_count,
+                local_features.descriptor_dim,
+            )
         except FeatureExtractionError:
+            self._log.warning("event=feature_extraction_failed digest=%s", digest[:16])
             raise
         except Exception as exc:  # pragma: no cover - изоляция ошибок OpenCV
+            self._log.exception("event=feature_extraction_unexpected digest=%s", digest[:16])
             raise FeatureExtractionError("Ошибка извлечения дескрипторов") from exc
 
         stem = payload.source_name or uuid.uuid4().hex
@@ -120,6 +142,11 @@ class ImageIngestionService:
                 content_type=f"image/{image_ext}",
             )
         except Exception as exc:  # pragma: no cover - S3 ошибки
+            self._log.exception(
+                "event=image_upload_failed digest=%s image_key=%s",
+                digest[:16],
+                image_key,
+            )
             raise StorageError("Не удалось сохранить изображение") from exc
 
         feature_key = await self._local_store.save(
@@ -127,6 +154,13 @@ class ImageIngestionService:
         )
         global_key = await self._global_store.save(
             stem, global_descriptor, metadata={"type": "global_descriptor"}
+        )
+        self._log.debug(
+            "event=artifacts_saved digest=%s image_key=%s local_key=%s global_key=%s",
+            digest[:16],
+            image_key,
+            feature_key,
+            global_key,
         )
         address = await self._geocoder.reverse(payload.latitude, payload.longitude)
 
@@ -138,7 +172,7 @@ class ImageIngestionService:
             "latitude": payload.latitude,
             "longitude": payload.longitude,
             "address": address,
-            "metadata": payload.metadata,
+            "metadata_json": payload.metadata,
             "image_hash": digest,
             "descriptor_count": local_features.descriptors.shape[0],
             "descriptor_dim": local_features.descriptors.shape[1],
@@ -159,7 +193,7 @@ class ImageIngestionService:
             latitude=record.latitude,
             longitude=record.longitude,
             address=record.address,
-            metadata=record.metadata,
+            metadata=record.metadata_json,
             descriptor_count=record.descriptor_count,
             descriptor_dim=record.descriptor_dim,
             keypoint_count=record.keypoint_count,

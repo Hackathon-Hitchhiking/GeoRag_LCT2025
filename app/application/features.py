@@ -11,6 +11,7 @@ import torch
 from lightglue import SuperPoint
 from lightglue.utils import batch_to_device, numpy_image_to_torch
 
+from ..logging import get_logger
 from ..utils.image import ensure_supported_size
 from .exceptions import FeatureExtractionError
 
@@ -89,15 +90,15 @@ class LocalFeatureSet:
             dtype=torch.float32,
             device=device,
         )
-        return batch_to_device(
-            {
-                "keypoints": keypoints.unsqueeze(0),
-                "descriptors": descriptors.unsqueeze(0),
-                "scores": scores.unsqueeze(0),
-                "image_size": image_size,
-            },
-            device=device,
-        )
+        batch = {
+            "keypoints": keypoints.unsqueeze(0),
+            "descriptors": descriptors.unsqueeze(0),
+            "scores": scores.unsqueeze(0),
+            "image_size": image_size,
+        }
+        # Современные версии LightGlue используют ключ "keypoint_scores"
+        batch["keypoint_scores"] = batch["scores"]
+        return batch_to_device(batch, device=device)
 
     def to_cv_keypoints(self) -> list[cv2.KeyPoint]:
         """Преобразовать признаки в формат OpenCV для визуализации."""
@@ -127,6 +128,13 @@ class SuperPointFeatureExtractor:
         }
         self._resize = resize
         self._extractor = SuperPoint(**conf).to(device).eval()
+        self._log = get_logger("georag.features")
+        self._log.info(
+            "event=superpoint_init max_keypoints=%s resize=%s device=%s",
+            max_keypoints,
+            resize,
+            device,
+        )
 
     def extract(self, image_bgr: np.ndarray) -> LocalFeatureSet:
         """Извлечь ключевые точки и дескрипторы из изображения BGR."""
@@ -142,13 +150,21 @@ class SuperPointFeatureExtractor:
                     tensor, resize=self._resize, side="long", antialias=True
                 )
         except Exception as exc:  # pragma: no cover - исключения PyTorch
+            self._log.exception("event=superpoint_forward_failed")
             raise FeatureExtractionError("Сбой при извлечении SuperPoint признаков") from exc
         keypoints = features["keypoints"][0].detach().cpu().numpy().astype(np.float32)
         descriptors = features["descriptors"][0].detach().cpu().numpy().astype(np.float32)
-        scores = features["scores"][0].detach().cpu().numpy().astype(np.float32)
+        scores_tensor = features.get("scores")
+        if scores_tensor is None:
+            scores_tensor = features.get("keypoint_scores")
+        if scores_tensor is None:
+            self._log.error("event=superpoint_missing_scores")
+            raise FeatureExtractionError("SuperPoint не вернул оценки ключевых точек")
+        scores = scores_tensor[0].detach().cpu().numpy().astype(np.float32)
         image_size_tensor = features["image_size"][0].detach().cpu().numpy()
         image_size = (int(image_size_tensor[1]), int(image_size_tensor[0]))
         if keypoints.size == 0:
+            self._log.warning("event=superpoint_no_keypoints")
             raise FeatureExtractionError("Не удалось выделить ключевые точки")
         return LocalFeatureSet(
             keypoints=keypoints,

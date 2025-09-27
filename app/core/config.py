@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +14,23 @@ class Settings(BaseSettings):
     dev_mode: bool = Field(default=True, alias="DEV_MODE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     allowed_hosts: list[str] | None = Field(default=None, alias="ALLOWED_HOSTS")
+
+    @field_validator("allowed_hosts", mode="before")
+    @classmethod
+    def _parse_allowed_hosts(
+        cls, value: list[str] | str | None
+    ) -> list[str] | None:
+        """Разрешить передавать список хостов как строку."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, list):
+            # Очищаем элементы, чтобы исключить пустые строки
+            hosts = [item.strip() for item in value if item and item.strip()]
+            return hosts or None
+        if isinstance(value, str):
+            hosts = [item.strip() for item in value.split(",") if item.strip()]
+            return hosts or None
+        return value
 
     # PostgreSQL connection
     database_dsn: str = Field(
@@ -46,8 +63,11 @@ class Settings(BaseSettings):
     global_score_weight: float = Field(default=0.35, alias="GLOBAL_SCORE_WEIGHT")
     local_score_weight: float = Field(default=0.65, alias="LOCAL_SCORE_WEIGHT")
     geometry_score_weight: float = Field(default=0.25, alias="GEOMETRY_SCORE_WEIGHT")
-    prefer_gpu: bool = Field(default=False, alias="PREFER_GPU")
+    compute_device: str | None = Field(default=None, alias="COMPUTE_DEVICE")
     max_search_results: int = Field(default=50, alias="MAX_SEARCH_RESULTS")
+    index_refresh_interval: int = Field(
+        default=7200, alias="INDEX_REFRESH_INTERVAL"
+    )
 
     # Nominatim integration
     nominatim_user_agent: str | None = Field(

@@ -77,8 +77,7 @@ docker compose up --build
 1. Скачайте уличные снимки Московской области из Mapillary (требуется токен):
 
    ```bash
-   export MAPILLARY_TOKEN=ваш_токен
-   make bootstrap-moscow
+   docker compose run --rm app make bootstrap-moscow
    ```
 
    Скрипт `scripts/download_moscow_mapillary.py` создаст каталог
@@ -91,10 +90,12 @@ docker compose up --build
 3. Запустите пакетный ingest:
 
    ```bash
-   make ingest
+   docker compose run --rm app make ingest
    ```
 
-   `scripts/ingest_train_data.py` вычислит признаки и наполнит базу.
+   `scripts/ingest_train_data.py` вычислит признаки и наполнит базу. Хостовый
+   каталог `train_data/` монтируется в контейнер автоматически, поэтому пути и
+   переменные окружения из `.env` совпадают с локальными.
 
 ### Формат каталога `train_data`
 
@@ -110,7 +111,8 @@ train_data/
 └── custom_dataset/
     ├── image_a.png
     ├── image_a.meta.json        # (опц.) широта/долгота/произвольные поля
-    └── manifest.jsonl           # (опц.) записи вида {"filename": "custom_dataset/image_a.png", ...}
+    ├── manifest.jsonl           # (опц.) записи вида {"filename": "custom_dataset/image_a.png", ...}
+    └── metadata.json            # (опц.) агрегированный JSON с полем results
 ```
 
 - **Обязательные поля:** `filename` (относительный путь), сама фотография.
@@ -119,6 +121,10 @@ train_data/
 - **Дополнительные поля:** `captured_at`, `compass_angle`, произвольные метки —
   все они будут сохранены в PostgreSQL как JSON-метаданные.
 - Поддерживаются форматы изображений: `jpg`, `jpeg`, `png`, `bmp`, `tif`, `tiff`.
+- Если в каталоге присутствует агрегированный `metadata.json`, ingest ищет рядом
+  файлы `<id>.<ext>` и извлекает поля `speed`, `angle`, `create_timestamp`,
+  `device`, `camera`. Поля `captured_at` и `compass_angle` автоматически
+  нормализуются в `create_timestamp` и `angle`.
 
 Скрипт ingest объединяет данные из манифеста и sidecar-файлов, приоритет у
 метаданных, лежащих рядом с изображением.
@@ -135,7 +141,7 @@ train_data/
 | `FEATURE_MAX_KEYPOINTS` | Ограничение на количество ключевых точек SuperPoint. |
 | `GLOBAL_DESCRIPTOR_TYPE`, `LOCAL_FEATURE_TYPE`, `MATCHER_TYPE` | Используемые модели пайплайна. |
 | `RETRIEVAL_CANDIDATES`, `GLOBAL_SCORE_WEIGHT`, `LOCAL_SCORE_WEIGHT`, `GEOMETRY_SCORE_WEIGHT` | Настройки ранжирования поиска и веса уровней пайплайна. |
-| `PREFER_GPU` | Включает вычисления на CUDA при наличии. |
+| `COMPUTE_DEVICE` | Явно задаёт устройство (`cpu`, `cuda`, `mps`, `cuda:0` и т.п.). |
 | `NOMINATIM_USER_AGENT` | Пользовательский агент для прямого и обратного геокодирования. |
 | `MAPILLARY_TOKEN` | Токен Mapillary для загрузки эталонных данных Московской области. |
 
