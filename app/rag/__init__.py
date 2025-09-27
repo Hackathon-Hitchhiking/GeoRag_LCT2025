@@ -1,3 +1,0 @@
-"""... implementation."""
-
-__all__ = ...

@@ -1,15 +1,30 @@
 [project]
-name = "medical-multimodal-rag"
+name = "georag-localization-service"
 version = "0.1.0"
-description = "Multimodal medical RAG service built on Haystack"
+description = "Visual geolocation service with NetVLAD retrieval and LightGlue matching"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "asyncpg>=0.30.0",
     "boto3>=1.40.35",
     "fastapi>=0.116.2",
+    "gdown>=5.2.0",
+    "h5py>=3.12.1",
     "pydantic>=2.11.9",
     "pydantic-settings>=2.10.1",
+    "scikit-image>=0.24.0",
+    "scipy>=1.13.1",
     "sqlalchemy[asyncio]>=2.0.43",
+    "torch>=2.5.1",
+    "torchvision>=0.20.1",
     "uvicorn>=0.36.0",
+    "opencv-python>=4.10.0",
+    "numpy>=1.26.0",
+    "pillow>=10.4.0",
+    "kornia>=0.7.3",
+    "lightglue @ git+https://github.com/cvg/LightGlue",
+    "geopy>=2.4.1",
+    "httpx>=0.27.2",
+    "ruff>=0.6.9",
+    "mypy>=1.13.0",
 ]
