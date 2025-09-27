@@ -17,7 +17,14 @@ RUN set -eux; \
         build-essential \
         zlib1g-dev \
         curl \
-        ca-certificates; \
+        ca-certificates \
+        git \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libgomp1 \
+        ffmpeg; \
     rm -rf /var/lib/apt/lists/*; \
     useradd -m -u 10001 appuser; \
     mkdir -p "${UV_CACHE_DIR}" /models; \
@@ -27,8 +34,8 @@ USER 10001:10001
 
 RUN python -m pip install --no-cache-dir --user uv
 
-COPY --chown=10001:10001 pyproject.toml /app/
-RUN uv sync --no-dev
+COPY --chown=10001:10001 pyproject.toml uv.lock /app/
+RUN uv sync --no-dev --frozen
 
 COPY --chown=10001:10001 ./app /app/app
 COPY --chown=10001:10001 ./entrypoint.sh /app/entrypoint.sh

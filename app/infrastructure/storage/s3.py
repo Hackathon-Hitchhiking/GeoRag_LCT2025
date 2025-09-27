@@ -1,4 +1,4 @@
-"""Abstractions for object storage interactions."""
+"""Инфраструктурные обёртки над S3-совместимым хранилищем."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from typing import Any
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-LOG = logging.getLogger("medical.storage")
+LOG = logging.getLogger("georag.storage")
 
 
 class S3Storage:
-    """Simple async wrapper over boto3 for storing binary blobs."""
+    """Асинхронная оболочка над boto3 для бинарных объектов."""
 
     def __init__(
         self,
@@ -44,7 +44,7 @@ class S3Storage:
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
     ) -> str:
-        """Upload a binary payload and return its object key."""
+        """Загрузить бинарный объект и вернуть его ключ."""
         if not data:
             raise ValueError("Cannot upload empty payload to S3")
 
@@ -56,9 +56,7 @@ class S3Storage:
 
         def _put() -> None:
             try:
-                self._client.put_object(
-                    Bucket=self._bucket, Key=key, Body=data, **extra
-                )
+                self._client.put_object(Bucket=self._bucket, Key=key, Body=data, **extra)
             except (BotoCoreError, ClientError):  # pragma: no cover - network path
                 LOG.exception("event=s3_put_failed key=%s", key)
                 raise
@@ -66,8 +64,24 @@ class S3Storage:
         await asyncio.to_thread(_put)
         return key
 
+    async def download(self, key: str) -> bytes:
+        """Загрузить бинарный объект из хранилища."""
+
+        def _get() -> bytes:
+            try:
+                response = self._client.get_object(Bucket=self._bucket, Key=key)
+            except (BotoCoreError, ClientError):  # pragma: no cover - network path
+                LOG.exception("event=s3_get_failed key=%s", key)
+                raise
+            body = response.get("Body")
+            if body is None:
+                raise ValueError(f"S3 object {key} has no body")
+            return body.read()
+
+        return await asyncio.to_thread(_get)
+
     async def delete(self, key: str) -> None:
-        """Delete an object if it exists."""
+        """Удалить объект, если он существует."""
 
         def _delete() -> None:
             try:
@@ -79,5 +93,5 @@ class S3Storage:
         await asyncio.to_thread(_delete)
 
     def build_path(self, key: str) -> str:
-        """Return a canonical S3 URI for the given object key."""
+        """Вернуть канонический S3 URI для ключа."""
         return f"s3://{self._bucket}/{key}"

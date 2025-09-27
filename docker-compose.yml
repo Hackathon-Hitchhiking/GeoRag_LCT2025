@@ -4,11 +4,9 @@ services:
   app:
     build:
       context: .
-    image: api-service
+    image: georag-api
     depends_on:
       postgres:
-        condition: service_started
-      qdrant:
         condition: service_started
       s3:
         condition: service_started
@@ -20,20 +18,23 @@ services:
       DEV_MODE: "${DEV_MODE:-false}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       ALLOWED_HOSTS: "${ALLOWED_HOSTS:-*}"
-      QDRANT_HOST: "${QDRANT_HOST:-qdrant}"
-      QDRANT_PORT: "${QDRANT_PORT:-6333}"
-      QDRANT_API_KEY: "${QDRANT_API_KEY:-}"
-      QDRANT_COLLECTION: "${QDRANT_COLLECTION:-medical_cases}"
-      QDRANT_DISTANCE: "${QDRANT_DISTANCE:-cosine}"
-      QDRANT_IMAGE_WEIGHT: "${QDRANT_IMAGE_WEIGHT:-0.4}"
-      DATABASE_DSN: "${DATABASE_DSN:-postgresql+asyncpg://postgres:postgres@postgres:5432/medical}"
+      DATABASE_DSN: "${DATABASE_DSN:-postgresql+asyncpg://postgres:postgres@postgres:5432/georag}"
       DATABASE_ECHO: "${DATABASE_ECHO:-false}"
-      S3_BUCKET: "${S3_BUCKET:-medical-cases}"
+      S3_BUCKET: "${S3_BUCKET:-georag-images}"
       S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-http://s3:9000}"
       S3_REGION: "${S3_REGION:-us-east-1}"
       S3_ACCESS_KEY: "${S3_ACCESS_KEY:-minioadmin}"
       S3_SECRET_KEY: "${S3_SECRET_KEY:-minioadmin}"
       S3_USE_SSL: "${S3_USE_SSL:-false}"
+      S3_FEATURES_PREFIX: "${S3_FEATURES_PREFIX:-features/local}"
+      S3_GLOBAL_PREFIX: "${S3_GLOBAL_PREFIX:-features/global}"
+      LOCAL_FEATURE_TYPE: "${LOCAL_FEATURE_TYPE:-superpoint_max}"
+      GLOBAL_DESCRIPTOR_TYPE: "${GLOBAL_DESCRIPTOR_TYPE:-netvlad}"
+      MATCHER_TYPE: "${MATCHER_TYPE:-lightglue}"
+      RETRIEVAL_CANDIDATES: "${RETRIEVAL_CANDIDATES:-32}"
+      GLOBAL_SCORE_WEIGHT: "${GLOBAL_SCORE_WEIGHT:-0.35}"
+      LOCAL_SCORE_WEIGHT: "${LOCAL_SCORE_WEIGHT:-0.65}"
+      PREFER_GPU: "${PREFER_GPU:-false}"
     ports:
       - "8000:8000"
     volumes:
@@ -43,22 +44,13 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: "${POSTGRES_DB:-medical}"
+      POSTGRES_DB: "${POSTGRES_DB:-georag}"
       POSTGRES_USER: "${POSTGRES_USER:-postgres}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-
-  qdrant:
-    image: qdrant/qdrant:v1.8.4
-    restart: unless-stopped
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
 
   s3:
     image: minio/minio:latest
@@ -80,7 +72,7 @@ services:
         condition: service_started
     environment:
       S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-http://s3:9000}"
-      S3_BUCKET: "${S3_BUCKET:-medical-cases}"
+      S3_BUCKET: "${S3_BUCKET:-georag-images}"
       S3_ACCESS_KEY: "${S3_ACCESS_KEY:-minioadmin}"
       S3_SECRET_KEY: "${S3_SECRET_KEY:-minioadmin}"
     entrypoint: >-
@@ -97,6 +89,5 @@ services:
 
 volumes:
   postgres_data:
-  qdrant_data:
   hf_models:
   s3_data:
