@@ -75,6 +75,17 @@ class Settings(BaseSettings):
     )
     nominatim_timeout: int = Field(default=5, alias="NOMINATIM_TIMEOUT")
 
+    # Vision-language model via Ollama
+    ollama_base_url: str = Field(
+        default="http://localhost:11434", alias="OLLAMA_BASE_URL"
+    )
+    ollama_model: str = Field(
+        default="qwen2.5-vl:7b-instruct", alias="OLLAMA_MODEL"
+    )
+    ollama_timeout: float = Field(
+        default=120.0, alias="OLLAMA_TIMEOUT_SECONDS"
+    )
+
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8",

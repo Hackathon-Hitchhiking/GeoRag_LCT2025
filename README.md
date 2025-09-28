@@ -144,6 +144,40 @@ train_data/
 | `COMPUTE_DEVICE` | Явно задаёт устройство (`cpu`, `cuda`, `mps`, `cuda:0` и т.п.). |
 | `NOMINATIM_USER_AGENT` | Пользовательский агент для прямого и обратного геокодирования. |
 | `MAPILLARY_TOKEN` | Токен Mapillary для загрузки эталонных данных Московской области. |
+| `OLLAMA_BASE_URL` | Базовый URL сервиса Ollama для визуально-языковой модели. |
+| `OLLAMA_MODEL` | Имя модели Ollama (по умолчанию Qwen2.5-VL-7B-Instruct). |
+| `OLLAMA_TIMEOUT_SECONDS` | Таймаут ожидания ответа Ollama API в секундах. |
+
+## Визуально-языковой модуль Ollama
+
+Сервис включает отдельный адаптер для визуально-языковой модели
+Qwen2.5-VL-7B-Instruct, развёрнутой через [Ollama](https://ollama.com/).
+Контейнер `ollama` добавлен в `docker-compose.yml` и по умолчанию слушает порт
+`11434`.
+
+Чтобы подготовить модель, выполните один раз:
+
+```bash
+docker compose up -d ollama
+docker compose exec ollama ollama pull qwen2.5-vl:7b-instruct
+```
+
+Высокоуровневый интерфейс расположен в `app/application/vlm.py`. Он описывает
+уличную сцену и формирует JSON с двумя полями: `address` (если в кадре есть
+точный адрес или указатель, иначе `null`) и `description` с кратким описанием
+местности.
+
+Пример использования внутри приложения:
+
+```python
+from app.application.vlm import VisionLanguageAnalyzer
+from app.infrastructure.vlm import OllamaVLMClient
+
+client = OllamaVLMClient()
+analyzer = VisionLanguageAnalyzer(client)
+scene = await analyzer.describe(image_base64)
+print(scene.address, scene.description)
+```
 
 ## API
 
