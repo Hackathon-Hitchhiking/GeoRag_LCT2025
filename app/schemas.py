@@ -48,6 +48,14 @@ class ImageIngestResponse(BaseModel):
     updated_at: datetime
 
 
+class ImageDetailsResponse(ImageIngestResponse):
+    """Детализированная информация об изображении из базы."""
+
+    image_base64: str = Field(
+        ..., description="Исходное изображение, закодированное в base64"
+    )
+
+
 class SearchRequest(BaseModel):
     """Запрос на поиск схожих изображений."""
 
@@ -160,3 +168,15 @@ class LocationSearchResponse(BaseModel):
     """Ответ на запрос поиска по координатам или адресу."""
 
     matches: list[LocationSearchMatch]
+
+
+class ImageSummaryResponse(BaseModel):
+    """Краткая сводка о содержимом базы изображений."""
+
+    total_images: int = Field(..., ge=0, description="Количество изображений в базе")
+    latest_image_id: int | None = Field(
+        default=None, description="Идентификатор последнего добавленного изображения"
+    )
+    latest_created_at: datetime | None = Field(
+        default=None, description="Время создания последней записи"
+    )

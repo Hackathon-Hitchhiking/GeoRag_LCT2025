@@ -20,14 +20,17 @@ from ..application.search import (
     ImageSearchService,
     SearchPayload,
 )
+from ..infrastructure.database.repositories import ImageRepository
 from ..logging import get_logger
 from ..schemas import (
     AddressSearchRequest,
     CoordinatesSearchRequest,
+    ImageDetailsResponse,
     ImageIngestRequest,
     ImageIngestResponse,
     LocationSearchMatch,
     LocationSearchResponse,
+    ImageSummaryResponse,
     SearchMatch,
     SearchRequest,
     SearchResponse,
@@ -51,6 +54,109 @@ def _get_search_service(request: Request) -> ImageSearchService:
     if service is None:
         raise RuntimeError("Search service не инициализирован")
     return service
+
+
+@router.get(
+    "/images/summary",
+    response_model=ImageSummaryResponse,
+    summary="Получить сводку по загруженным изображениям",
+)
+async def get_images_summary(request: Request) -> ImageSummaryResponse:
+    """Вернуть агрегированную информацию о содержимом базы."""
+
+    request_id = uuid.uuid4().hex
+    LOG.info("event=get_images_summary_received request_id=%s", request_id)
+    database = getattr(request.app.state, "database")
+    async with database.session() as session:
+        repo = ImageRepository(session)
+        total = await repo.count()
+        latest = await repo.get_latest()
+
+    response = ImageSummaryResponse(
+        total_images=total,
+        latest_image_id=latest.id if latest else None,
+        latest_created_at=latest.created_at if latest else None,
+    )
+    LOG.info(
+        "event=get_images_summary_completed request_id=%s total_images=%s",
+        request_id,
+        total,
+    )
+    return response
+
+
+@router.get(
+    "/images/{image_id}",
+    response_model=ImageDetailsResponse,
+    summary="Получить детальную информацию об изображении",
+)
+async def get_image_details(request: Request, image_id: int) -> ImageDetailsResponse:
+    """Вернуть метаданные и само изображение из базы."""
+
+    request_id = uuid.uuid4().hex
+    LOG.info(
+        "event=get_image_details_received request_id=%s image_id=%s",
+        request_id,
+        image_id,
+    )
+    database = getattr(request.app.state, "database")
+    async with database.session() as session:
+        repo = ImageRepository(session)
+        record = await repo.get_by_id(image_id)
+
+    if record is None:
+        LOG.info(
+            "event=get_image_details_not_found request_id=%s image_id=%s",
+            request_id,
+            image_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Запись не найдена"
+        )
+
+    storage = getattr(request.app.state, "storage")
+    local_store = getattr(request.app.state, "local_store")
+    global_store = getattr(request.app.state, "global_store")
+    try:
+        image_bytes = await storage.download(record.image_key)
+    except Exception as exc:  # pragma: no cover - реальные ошибки S3
+        LOG.error(
+            "event=get_image_details_image_failed request_id=%s image_key=%s error=%s",
+            request_id,
+            record.image_key,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Не удалось загрузить изображение",
+        ) from exc
+
+    response = ImageDetailsResponse(
+        id=record.id,
+        image_uri=storage.build_path(record.image_key),
+        local_feature_uri=local_store.build_uri(record.feature_key),
+        global_descriptor_uri=global_store.build_uri(record.global_descriptor_key),
+        latitude=record.latitude,
+        longitude=record.longitude,
+        address=record.address,
+        metadata=record.metadata_json,
+        descriptor_count=record.descriptor_count,
+        descriptor_dim=record.descriptor_dim,
+        keypoint_count=record.keypoint_count,
+        global_descriptor_dim=record.global_descriptor_dim,
+        local_feature_type=record.local_feature_type,
+        global_descriptor_type=record.global_descriptor_type,
+        matcher_type=record.matcher_type,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        image_base64=to_base64(image_bytes),
+    )
+    LOG.info(
+        "event=get_image_details_completed request_id=%s image_id=%s",
+        request_id,
+        image_id,
+    )
+    return response
 
 
 @router.get("/health", summary="Проверка готовности")

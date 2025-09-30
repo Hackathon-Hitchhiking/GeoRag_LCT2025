@@ -44,6 +44,18 @@ class ImageRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_id(self, record_id: int) -> ImageRecord | None:
+        """Получить запись по идентификатору."""
+        stmt = select(ImageRecord).where(ImageRecord.id == record_id)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_latest(self) -> ImageRecord | None:
+        """Вернуть самую свежую запись по дате создания."""
+        stmt = select(ImageRecord).order_by(ImageRecord.created_at.desc()).limit(1)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def count(self) -> int:
         """Подсчитать количество изображений в базе."""
         stmt = select(func.count(ImageRecord.id))
