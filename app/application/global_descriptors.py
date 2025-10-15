@@ -45,7 +45,7 @@ class GlobalDescriptor:
         return (self.vector / norm).astype(np.float32)
 
     def to_bytes(self) -> bytes:
-        """Сериализовать дескриптор для хранения в S3."""
+        """Сериализовать дескриптор для хранения."""
         buffer = io.BytesIO()
         np.savez_compressed(buffer, descriptor=self.vector.astype(np.float32), version=np.int32(1))
         return buffer.getvalue()

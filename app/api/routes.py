@@ -28,11 +28,13 @@ from ..schemas import (
     ImageIngestResponse,
     LocationSearchMatch,
     LocationSearchResponse,
+    MatchCorrespondence,
+    Point3D,
     SearchMatch,
     SearchRequest,
     SearchResponse,
 )
-from ..utils.image import from_base64, to_base64
+from ..utils.image import from_base64
 
 LOG = get_logger("georag.api")
 
@@ -80,9 +82,6 @@ async def add_image(request: Request, payload: ImageIngestRequest) -> ImageInges
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     ingestion_service = _get_ingestion_service(request)
-    local_store = getattr(request.app.state, "local_store")
-    global_store = getattr(request.app.state, "global_store")
-    storage = getattr(request.app.state, "storage")
     ingestion_payload = IngestionPayload(
         data=image_bytes,
         latitude=payload.latitude,
@@ -117,9 +116,8 @@ async def add_image(request: Request, payload: ImageIngestRequest) -> ImageInges
     )
     return ImageIngestResponse(
         id=stored.record_id,
-        image_uri=storage.build_path(stored.image_key),
-        local_feature_uri=local_store.build_uri(stored.feature_key),
-        global_descriptor_uri=global_store.build_uri(stored.global_descriptor_key),
+        image_url=stored.image_url,
+        vector_id=stored.vector_id,
         latitude=stored.latitude,
         longitude=stored.longitude,
         address=stored.address,
@@ -180,19 +178,53 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
         )
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
-    query_image_bytes = result.query_bytes
-    if payload.plot_dots and result.query_local.keypoints_count:
-        query_image_bytes = await search_service.prepare_visual(
-            result.query_local, query_image_bytes
-        )
+    import numpy as np
 
-    storage = getattr(request.app.state, "storage")
-    local_store = getattr(request.app.state, "local_store")
+    point_limit = getattr(request.app.state, "point_cloud_limit", 2048)
+
+    def _to_points(coords: np.ndarray, scores: np.ndarray) -> list[Point3D]:
+        return [
+            Point3D(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]), score=float(score))
+            for vec, score in zip(coords, scores)
+        ]
+
+    _, q_coords, q_scores = result.query_local.to_point_cloud(point_limit)
+    query_point_cloud = _to_points(q_coords, q_scores)
+
     matches: list[SearchMatch] = []
     for match in result.matches:
-        image_bytes = match.image_bytes
-        if payload.plot_dots:
-            image_bytes = await search_service.prepare_visual(match.local_features, image_bytes)
+        _, m_coords, m_scores = match.local_features.to_point_cloud(point_limit)
+        candidate_cloud = _to_points(m_coords, m_scores)
+
+        query_indices = match.match_score.query_indices.astype(np.int32)
+        candidate_indices = match.match_score.candidate_indices.astype(np.int32)
+        query_rays = result.query_local.indices_to_rays(query_indices)
+        candidate_rays = match.local_features.indices_to_rays(candidate_indices)
+        query_scores = result.query_local.scores[query_indices]
+        candidate_scores = match.local_features.scores[candidate_indices]
+        match_scores = match.match_score.matching_scores
+
+        correspondences: list[MatchCorrespondence] = []
+        for idx, (qr, cr) in enumerate(zip(query_rays, candidate_rays, strict=False)):
+            score = float(match_scores[idx]) if idx < len(match_scores) else 0.0
+            correspondences.append(
+                MatchCorrespondence(
+                    query=Point3D(
+                        x=float(qr[0]),
+                        y=float(qr[1]),
+                        z=float(qr[2]),
+                        score=float(query_scores[idx]),
+                    ),
+                    candidate=Point3D(
+                        x=float(cr[0]),
+                        y=float(cr[1]),
+                        z=float(cr[2]),
+                        score=float(candidate_scores[idx]),
+                    ),
+                    score=score,
+                )
+            )
+
         matches.append(
             SearchMatch(
                 image_id=match.record.id,
@@ -204,18 +236,19 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
                 geometry_inliers=match.match_score.inliers,
                 geometry_inlier_ratio=match.match_score.inlier_ratio,
                 geometry_score=match.match_score.geometric_strength,
-                image_uri=storage.build_path(match.record.image_key),
-                feature_uri=local_store.build_uri(match.record.feature_key),
+                image_url=match.image_url,
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                image_base64=to_base64(image_bytes),
+                point_cloud=candidate_cloud,
+                correspondences=correspondences,
             )
         )
 
     response = SearchResponse(
-        query_image_base64=to_base64(query_image_bytes),
+        query_image_url=result.query_image_url,
+        query_point_cloud=query_point_cloud,
         matches=matches,
     )
     LOG.info(
@@ -258,25 +291,27 @@ async def search_by_coordinates(
         LOG.info("event=search_by_coordinates_empty_db request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    storage = getattr(request.app.state, "storage")
-    local_store = getattr(request.app.state, "local_store")
-
     matches: list[LocationSearchMatch] = []
     for match in result.matches:
-        image_bytes = match.image_bytes
-        if payload.plot_dots and match.local_features is not None:
-            image_bytes = await search_service.prepare_visual(match.local_features, image_bytes)
+        point_cloud: list[Point3D] | None = None
+        if match.local_features is not None:
+            _, coords, scores = match.local_features.to_point_cloud(
+                getattr(request.app.state, "point_cloud_limit", 2048)
+            )
+            point_cloud = [
+                Point3D(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]), score=float(score))
+                for vec, score in zip(coords, scores)
+            ]
         matches.append(
             LocationSearchMatch(
                 image_id=match.record.id,
                 distance_meters=match.distance_meters,
-                image_uri=storage.build_path(match.record.image_key),
-                feature_uri=local_store.build_uri(match.record.feature_key),
+                image_url=match.image_url,
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                image_base64=to_base64(image_bytes),
+                point_cloud=point_cloud,
             )
         )
 
@@ -326,25 +361,27 @@ async def search_by_address(
         LOG.info("event=search_by_address_empty_db request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    storage = getattr(request.app.state, "storage")
-    local_store = getattr(request.app.state, "local_store")
-
     matches: list[LocationSearchMatch] = []
     for match in result.matches:
-        image_bytes = match.image_bytes
-        if payload.plot_dots and match.local_features is not None:
-            image_bytes = await search_service.prepare_visual(match.local_features, image_bytes)
+        point_cloud: list[Point3D] | None = None
+        if match.local_features is not None:
+            _, coords, scores = match.local_features.to_point_cloud(
+                getattr(request.app.state, "point_cloud_limit", 2048)
+            )
+            point_cloud = [
+                Point3D(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]), score=float(score))
+                for vec, score in zip(coords, scores)
+            ]
         matches.append(
             LocationSearchMatch(
                 image_id=match.record.id,
                 distance_meters=match.distance_meters,
-                image_uri=storage.build_path(match.record.image_key),
-                feature_uri=local_store.build_uri(match.record.feature_key),
+                image_url=match.image_url,
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                image_base64=to_base64(image_bytes),
+                point_cloud=point_cloud,
             )
         )
 

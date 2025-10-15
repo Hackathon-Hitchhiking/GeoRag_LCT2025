@@ -25,6 +25,9 @@ class MatchScore:
     inliers: int
     inlier_ratio: float
     geometric_score: float
+    query_indices: np.ndarray
+    candidate_indices: np.ndarray
+    matching_scores: np.ndarray
 
     @property
     def match_ratio(self) -> float:
@@ -69,6 +72,9 @@ class LightGlueMatcher:
                 inliers=0,
                 inlier_ratio=0.0,
                 geometric_score=0.0,
+                query_indices=np.empty(0, dtype=np.int32),
+                candidate_indices=np.empty(0, dtype=np.int32),
+                matching_scores=np.empty(0, dtype=np.float32),
             )
 
         inputs = {
@@ -97,14 +103,20 @@ class LightGlueMatcher:
                 inliers=0,
                 inlier_ratio=0.0,
                 geometric_score=0.0,
+                query_indices=np.empty(0, dtype=np.int32),
+                candidate_indices=np.empty(0, dtype=np.int32),
+                matching_scores=np.empty(0, dtype=np.float32),
             )
 
         matched_scores = scores0[valid].detach().cpu().numpy().astype(np.float32)
         mean_score = float(np.clip(np.mean(matched_scores), 0.0, 1.0)) if matched_scores.size else 0.0
 
-        query_indices = torch.arange(matches0.shape[0], device=matches0.device)[valid]
+        query_indices_tensor = torch.arange(matches0.shape[0], device=matches0.device)[
+            valid
+        ]
+        query_indices = query_indices_tensor.detach().cpu().numpy().astype(np.int32)
         candidate_indices = matches0[valid].detach().cpu().numpy().astype(np.int32)
-        query_points = query.keypoints[query_indices.detach().cpu().numpy().astype(np.int32)]
+        query_points = query.keypoints[query_indices]
         candidate_points = candidate.keypoints[candidate_indices]
 
         inliers = 0
@@ -144,6 +156,9 @@ class LightGlueMatcher:
             inliers=inliers,
             inlier_ratio=inlier_ratio,
             geometric_score=geometric_score,
+            query_indices=query_indices,
+            candidate_indices=candidate_indices,
+            matching_scores=matched_scores,
         )
 
     async def amatch(self, query: LocalFeatureSet, candidate: LocalFeatureSet) -> MatchScore:

@@ -6,25 +6,36 @@ services:
     depends_on:
       postgres:
         condition: service_started
-      s3:
+      qdrant:
         condition: service_started
-      s3-init:
-        condition: service_completed_successfully
+      minio:
+        condition: service_started
     environment:
       DEV_MODE: "${DEV_MODE:-true}"
       LOG_LEVEL: "${LOG_LEVEL:-DEBUG}"
       ALLOWED_HOSTS: "${ALLOWED_HOSTS:-*}"
       DATABASE_DSN: "${DATABASE_DSN_DOCKER:-postgresql+asyncpg://postgres:postgres@postgres:5432/georag}"
       DATABASE_ECHO: "${DATABASE_ECHO:-false}"
-      S3_BUCKET: "${S3_BUCKET:-geo-images}"
-      S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-http://s3:9000}"
-      S3_REGION: "${S3_REGION:-ru-central1}"
-      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-localstack}"
-      S3_SECRET_KEY: "${S3_SECRET_KEY:-localstack}"
-      S3_USE_SSL: "${S3_USE_SSL:-false}"
-      S3_IMAGES_PREFIX: "${S3_IMAGES_PREFIX:-images}"
-      S3_FEATURES_PREFIX: "${S3_FEATURES_PREFIX:-features/local}"
-      S3_GLOBAL_PREFIX: "${S3_GLOBAL_PREFIX:-features/global}"
+      S3_BUCKET: "${S3_BUCKET:-georag}"
+      S3_REGION: "${S3_REGION:-us-east-1}"
+      S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-http://minio:9000}"
+      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-minioadmin}"
+      S3_SECRET_KEY: "${S3_SECRET_KEY:-minioadmin}"
+      S3_PUBLIC_BASE_URL: "${S3_PUBLIC_BASE_URL:-http://localhost:9000/georag}"
+      S3_PRESIGN_TTL: "${S3_PRESIGN_TTL:-3600}"
+      S3_MAX_PARALLEL: "${S3_MAX_PARALLEL:-16}"
+      STORAGE_IMAGE_SUBDIR: "${STORAGE_IMAGE_SUBDIR:-images}"
+      STORAGE_FEATURE_SUBDIR: "${STORAGE_FEATURE_SUBDIR:-features}"
+      STORAGE_PREVIEW_SUBDIR: "${STORAGE_PREVIEW_SUBDIR:-previews}"
+      STORAGE_QUERY_SUBDIR: "${STORAGE_QUERY_SUBDIR:-queries}"
+      FEATURE_CACHE_SIZE_MB: "${FEATURE_CACHE_SIZE_MB:-1536}"
+      FEATURE_CACHE_ITEMS: "${FEATURE_CACHE_ITEMS:-512}"
+      FEATURE_PREFETCH_LIMIT: "${FEATURE_PREFETCH_LIMIT:-16}"
+      QDRANT_URL: "${QDRANT_URL:-http://qdrant:6333}"
+      QDRANT_COLLECTION: "${QDRANT_COLLECTION:-georag_images}"
+      QDRANT_SHARDS: "${QDRANT_SHARDS:-1}"
+      QDRANT_REPLICATION: "${QDRANT_REPLICATION:-1}"
+      QDRANT_ON_DISK: "${QDRANT_ON_DISK:-true}"
       FEATURE_MAX_KEYPOINTS: "${FEATURE_MAX_KEYPOINTS:-4096}"
       LOCAL_FEATURE_TYPE: "${LOCAL_FEATURE_TYPE:-superpoint_max}"
       GLOBAL_DESCRIPTOR_TYPE: "${GLOBAL_DESCRIPTOR_TYPE:-netvlad}"
@@ -34,7 +45,7 @@ services:
       LOCAL_SCORE_WEIGHT: "${LOCAL_SCORE_WEIGHT:-0.65}"
       GEOMETRY_SCORE_WEIGHT: "${GEOMETRY_SCORE_WEIGHT:-0.25}"
       MAX_SEARCH_RESULTS: "${MAX_SEARCH_RESULTS:-50}"
-      INDEX_REFRESH_INTERVAL: "${INDEX_REFRESH_INTERVAL:-7200}"
+      POINT_CLOUD_LIMIT: "${POINT_CLOUD_LIMIT:-2048}"
       COMPUTE_DEVICE: "${COMPUTE_DEVICE:-}"
       NOMINATIM_USER_AGENT: "${NOMINATIM_USER_AGENT:-GeoRAG/1.0 (+https://example.com)}"
       NOMINATIM_TIMEOUT: "${NOMINATIM_TIMEOUT:-50}"
@@ -57,40 +68,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  s3:
-    image: minio/minio:latest
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: "${S3_ACCESS_KEY:-localstack}"
-      MINIO_ROOT_PASSWORD: "${S3_SECRET_KEY:-localstack}"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - s3_data:/data
-
-  s3-init:
-    image: minio/mc:latest
-    depends_on:
-      s3:
-        condition: service_started
-    environment:
-      S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-http://s3:9000}"
-      S3_BUCKET: "${S3_BUCKET:-geo-images}"
-      S3_ACCESS_KEY: "${S3_ACCESS_KEY:-localstack}"
-      S3_SECRET_KEY: "${S3_SECRET_KEY:-localstack}"
-    entrypoint: >-
-      /bin/sh -c "
-      set -euo pipefail;
-      until mc alias set local "$${S3_ENDPOINT_URL}" "$${S3_ACCESS_KEY}" "$${S3_SECRET_KEY}"; do
-        echo 'Waiting for MinIO...';
-        sleep 1;
-      done;
-      mc mb --ignore-existing local/$${S3_BUCKET};
-      mc anonymous set download local/$${S3_BUCKET};
-      "
-    restart: "no"
 
   ollama:
     image: ollama/ollama:latest
@@ -102,8 +79,30 @@ services:
     volumes:
       - ollama_data:/root/.ollama
 
+  qdrant:
+    image: qdrant/qdrant:v1.12.3
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  minio:
+    image: minio/minio:RELEASE.2024-10-02T17-50-41Z
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: "${S3_ACCESS_KEY:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${S3_SECRET_KEY:-minioadmin}"
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
 volumes:
   postgres_data:
   nn_models:
-  s3_data:
+  qdrant_data:
   ollama_data:
+  minio_data:

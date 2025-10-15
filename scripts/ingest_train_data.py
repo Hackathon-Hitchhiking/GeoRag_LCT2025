@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+from logging.handlers import WatchedFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +15,27 @@ import torch
 from app.application.feature_store import FeatureStore
 from app.application.features import LocalFeatureSet, SuperPointFeatureExtractor
 from app.application.geocoder import Geocoder
-from app.application.global_descriptors import GlobalDescriptor, NetVLADGlobalExtractor
+from app.application.global_descriptors import NetVLADGlobalExtractor
 from app.application.ingestion import ImageIngestionService, IngestionPayload
 from app.core.config import get_settings
 from app.infrastructure.database.session import Database
-from app.infrastructure.storage.s3 import S3Storage
+from app.infrastructure.storage import S3Storage
+from app.infrastructure.vector.qdrant import QdrantVectorStore
 
 LOG = logging.getLogger("georag.ingest")
+
+
+def setup_logging(log_path: Path | None) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(WatchedFileHandler(log_path, encoding="utf-8"))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        handlers=handlers,
+    )
+
 
 ALLOWED_METADATA_KEYS = {
     "speed",
@@ -194,26 +209,36 @@ async def ingest_directory(data_dir: Path) -> None:
 
     storage = S3Storage(
         bucket=settings.s3_bucket,
+        region=settings.s3_region,
         endpoint_url=settings.s3_endpoint_url,
-        region_name=settings.s3_region,
         access_key=settings.s3_access_key,
         secret_key=settings.s3_secret_key,
-        use_ssl=settings.s3_use_ssl,
+        session_token=settings.s3_session_token,
+        public_base_url=settings.s3_public_base_url,
+        presign_ttl=settings.s3_presign_ttl,
+        max_parallel=settings.s3_max_parallel,
     )
-    device = torch.device("cuda" if settings.prefer_gpu and torch.cuda.is_available() else "cpu")
+    if settings.compute_device:
+        device = torch.device(settings.compute_device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     local_store = FeatureStore[LocalFeatureSet](
         storage,
-        prefix=settings.s3_features_prefix,
+        prefix=settings.feature_subdir,
         serializer=lambda pack: pack.to_bytes(),
         deserializer=LocalFeatureSet.from_bytes,
     )
-    global_store = FeatureStore[GlobalDescriptor](
-        storage,
-        prefix=settings.s3_global_prefix,
-        serializer=lambda desc: desc.to_bytes(),
-        deserializer=GlobalDescriptor.from_bytes,
+    vector_store = QdrantVectorStore(
+        url=settings.qdrant_url,
+        api_key=settings.qdrant_api_key,
+        collection=settings.qdrant_collection,
+        vector_dim=4096,
+        on_disk=settings.qdrant_on_disk,
+        shard_number=settings.qdrant_shard_number,
+        replication_factor=settings.qdrant_replication_factor,
     )
+    await vector_store.ensure_collection()
     local_extractor = SuperPointFeatureExtractor(
         device=device,
         max_keypoints=settings.feature_max_keypoints,
@@ -227,11 +252,11 @@ async def ingest_directory(data_dir: Path) -> None:
         database=database,
         storage=storage,
         local_store=local_store,
-        global_store=global_store,
         local_extractor=local_extractor,
         global_extractor=global_extractor,
         geocoder=geocoder,
-        image_prefix=settings.s3_images_prefix,
+        vector_store=vector_store,
+        image_prefix=settings.image_subdir,
         local_feature_type=settings.local_feature_type,
         global_descriptor_type=settings.global_descriptor_type,
         matcher_type=settings.matcher_type,
@@ -255,9 +280,9 @@ async def ingest_directory(data_dir: Path) -> None:
             try:
                 stored = await ingestion_service.ingest(payload)
                 LOG.info(
-                    "event=image_ingested id=%s key=%s lat=%s lon=%s",
+                    "event=image_ingested id=%s url=%s lat=%s lon=%s",
                     stored.record_id,
-                    stored.image_key,
+                    stored.image_url,
                     stored.latitude,
                     stored.longitude,
                 )
@@ -275,9 +300,15 @@ def main() -> None:
         default="train_data",
         help="Каталог с обучающими изображениями",
     )
+    parser.add_argument(
+        "--log-file",
+        default="logs/ingest.log",
+        help="Путь до файла, куда сохранять ход импорта",
+    )
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
+    log_path = Path(args.log_file).resolve() if args.log_file else None
+    setup_logging(log_path)
     data_dir = Path(args.data_dir).resolve()
     if not data_dir.exists():
         raise SystemExit(f"Каталог {data_dir} не найден")

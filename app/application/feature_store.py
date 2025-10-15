@@ -1,4 +1,4 @@
-"""Инфраструктурный слой для сохранения дескрипторов в S3."""
+"""Инфраструктурный слой для сохранения дескрипторов на диске."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from ..infrastructure.storage.s3 import S3Storage
+from ..infrastructure.storage import FileSystemStorage, S3Storage
 from .exceptions import StorageError
 
 T = TypeVar("T")
@@ -27,7 +27,7 @@ class FeatureStore(Generic[T]):
 
     def __init__(
         self,
-        storage: S3Storage,
+        storage: FileSystemStorage | S3Storage,
         *,
         prefix: str,
         serializer: Callable[[T], bytes],
@@ -52,25 +52,39 @@ class FeatureStore(Generic[T]):
         try:
             payload = await asyncio.to_thread(self._serializer, pack)
             key = self.build_key(stem)
-            await self._storage.upload(
-                key=key,
-                data=payload,
+            await self._storage.save(
+                key,
+                payload,
                 content_type="application/octet-stream",
-                metadata=metadata or {"type": "features"},
+                metadata=metadata or {},
             )
-        except Exception as exc:  # pragma: no cover - реальный S3
+        except Exception as exc:  # pragma: no cover - IO errors
             raise StorageError("Не удалось сохранить признаки") from exc
         return key
 
     async def load(self, key: str) -> StoredFeature[T]:
         """Загрузить дескрипторы по ключу."""
         try:
-            payload = await self._storage.download(key)
+            payload = await self._storage.load(key)
             pack = await asyncio.to_thread(self._deserializer, payload)
-        except Exception as exc:  # pragma: no cover - реальный S3
+        except Exception as exc:  # pragma: no cover - IO errors
             raise StorageError(f"Не удалось загрузить признаки {key}") from exc
         return StoredFeature(pack=pack, key=key)
 
+    async def load_many(self, keys: list[str]) -> list[StoredFeature[T]]:
+        """Загрузить несколько наборов дескрипторов параллельно."""
+        if not keys:
+            return []
+        try:
+            batches = await self._storage.load_many(keys)
+            results: list[StoredFeature[T]] = []
+            for item in batches:
+                pack = await asyncio.to_thread(self._deserializer, item.payload)
+                results.append(StoredFeature(pack=pack, key=item.key))
+        except Exception as exc:  # pragma: no cover - IO errors
+            raise StorageError("Не удалось загрузить набор признаков") from exc
+        return results
+
     def build_uri(self, key: str) -> str:
         """Получить полный URI до объекта."""
-        return self._storage.build_path(key)
+        return self._storage.build_url(key)

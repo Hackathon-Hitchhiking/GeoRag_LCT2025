@@ -53,11 +53,11 @@ class LocalFeatureSet:
         np.savez_compressed(
             buffer,
             keypoints=self.keypoints.astype(np.float32),
-            descriptors=self.descriptors.astype(np.float32),
-            scores=self.scores.astype(np.float32),
+            descriptors=self.descriptors.astype(np.float16),
+            scores=self.scores.astype(np.float16),
             height=np.int32(self.image_size[0]),
             width=np.int32(self.image_size[1]),
-            version=np.int32(1),
+            version=np.int32(2),
         )
         return buffer.getvalue()
 
@@ -109,6 +109,53 @@ class LocalFeatureSet:
                 cv2.KeyPoint(x=float(x), y=float(y), size=size, response=float(score))
             )
         return keypoints_cv
+
+    def to_point_cloud(
+        self, max_points: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Преобразовать ключевые точки в нормализованные 3D-направления."""
+
+        total = self.keypoints_count
+        if total == 0:
+            return (
+                np.empty(0, dtype=np.int32),
+                np.empty((0, 3), dtype=np.float32),
+                np.empty(0, dtype=np.float32),
+            )
+
+        if max_points is None or max_points >= total:
+            indices = np.arange(total, dtype=np.int32)
+        else:
+            max_points = max(1, max_points)
+            top_idx = np.argpartition(-self.scores, max_points - 1)[:max_points]
+            order = np.argsort(-self.scores[top_idx])
+            indices = top_idx[order].astype(np.int32)
+
+        normalized = self.indices_to_rays(indices)
+        scores = self.scores[indices]
+        return indices, normalized, scores
+
+    def indices_to_rays(self, indices: np.ndarray) -> np.ndarray:
+        """Преобразовать произвольные индексы ключевых точек в лучи камеры."""
+
+        if indices.size == 0:
+            return np.empty((0, 3), dtype=np.float32)
+        points = self.keypoints[indices]
+        height, width = self.image_size
+        cx = (width - 1) / 2.0
+        cy = (height - 1) / 2.0
+        f = float(max(width, height))
+        normalized = np.empty((points.shape[0], 3), dtype=np.float32)
+        normalized[:, 0] = (points[:, 0] - cx) / f
+        normalized[:, 1] = (points[:, 1] - cy) / f
+        normalized[:, 2] = 1.0
+        norms = np.linalg.norm(normalized, axis=1, keepdims=True)
+        np.divide(
+            normalized,
+            np.clip(norms, 1e-6, None),
+            out=normalized,
+        )
+        return normalized
 
 
 class SuperPointFeatureExtractor:

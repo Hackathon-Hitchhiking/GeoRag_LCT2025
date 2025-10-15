@@ -15,14 +15,15 @@ from .api.routes import router as api_router
 from .application.feature_store import FeatureStore
 from .application.features import LocalFeatureSet, SuperPointFeatureExtractor
 from .application.geocoder import Geocoder
-from .application.global_descriptors import GlobalDescriptor, NetVLADGlobalExtractor
+from .application.global_descriptors import NetVLADGlobalExtractor
 from .application.ingestion import ImageIngestionService
-from .application.index import ImageFeatureIndex
+from .application.local_cache import LocalFeatureCache
 from .application.matcher import LightGlueMatcher
 from .application.search import ImageSearchService
 from .core.config import get_settings
 from .infrastructure.database.session import Database
-from .infrastructure.storage.s3 import S3Storage
+from .infrastructure.storage import S3Storage
+from .infrastructure.vector.qdrant import QdrantVectorStore
 from .logging import configure_logging
 
 LOG = logging.getLogger("georag.lifespan")
@@ -37,11 +38,14 @@ async def lifespan(app: FastAPI):
 
     storage = S3Storage(
         bucket=settings.s3_bucket,
+        region=settings.s3_region,
         endpoint_url=settings.s3_endpoint_url,
-        region_name=settings.s3_region,
         access_key=settings.s3_access_key,
         secret_key=settings.s3_secret_key,
-        use_ssl=settings.s3_use_ssl,
+        session_token=settings.s3_session_token,
+        public_base_url=settings.s3_public_base_url,
+        presign_ttl=settings.s3_presign_ttl,
+        max_parallel=settings.s3_max_parallel,
     )
 
     if settings.compute_device:
@@ -51,21 +55,9 @@ async def lifespan(app: FastAPI):
 
     local_store = FeatureStore[LocalFeatureSet](
         storage,
-        prefix=settings.s3_features_prefix,
+        prefix=settings.feature_subdir,
         serializer=lambda pack: pack.to_bytes(),
         deserializer=LocalFeatureSet.from_bytes,
-    )
-    global_store = FeatureStore[GlobalDescriptor](
-        storage,
-        prefix=settings.s3_global_prefix,
-        serializer=lambda desc: desc.to_bytes(),
-        deserializer=GlobalDescriptor.from_bytes,
-    )
-
-    index = ImageFeatureIndex(
-        database=database,
-        local_store=local_store,
-        refresh_interval=float(getattr(settings, "index_refresh_interval", 7200)),
     )
 
     local_extractor = SuperPointFeatureExtractor(
@@ -75,55 +67,68 @@ async def lifespan(app: FastAPI):
     global_extractor = NetVLADGlobalExtractor(device=device)
     matcher = LightGlueMatcher(device=device)
     geocoder = Geocoder(user_agent=settings.nominatim_user_agent, timeout=settings.nominatim_timeout)
-
-    await index.start()
+    feature_cache = LocalFeatureCache(
+        max_bytes=settings.feature_cache_size_mb * 1024 * 1024,
+        max_items=settings.feature_cache_items,
+    )
+    vector_store = QdrantVectorStore(
+        url=settings.qdrant_url,
+        api_key=settings.qdrant_api_key,
+        collection=settings.qdrant_collection,
+        vector_dim=4096,
+        on_disk=settings.qdrant_on_disk,
+        shard_number=settings.qdrant_shard_number,
+        replication_factor=settings.qdrant_replication_factor,
+    )
+    await vector_store.ensure_collection()
 
     ingestion_service = ImageIngestionService(
         database=database,
         storage=storage,
         local_store=local_store,
-        global_store=global_store,
         local_extractor=local_extractor,
         global_extractor=global_extractor,
         geocoder=geocoder,
-        image_prefix=settings.s3_images_prefix,
+        vector_store=vector_store,
+        image_prefix=settings.image_subdir,
         local_feature_type=settings.local_feature_type,
         global_descriptor_type=settings.global_descriptor_type,
         matcher_type=settings.matcher_type,
-        index=index,
     )
     search_service = ImageSearchService(
+        database=database,
         storage=storage,
+        local_store=local_store,
         local_extractor=local_extractor,
         global_extractor=global_extractor,
         matcher=matcher,
-        index=index,
+        vector_store=vector_store,
+        feature_cache=feature_cache,
         retrieval_candidates=settings.retrieval_candidates,
         global_weight=settings.global_score_weight,
         local_weight=settings.local_score_weight,
         max_results=settings.max_search_results,
         geometry_weight=settings.geometry_score_weight,
         geocoder=geocoder,
+        query_prefix=settings.query_subdir,
+        prefetch_limit=settings.feature_prefetch_limit,
     )
 
     app.state.database = database
     app.state.storage = storage
     app.state.local_store = local_store
-    app.state.global_store = global_store
-    app.state.index = index
+    app.state.feature_cache = feature_cache
+    app.state.vector_store = vector_store
     app.state.ingestion_service = ingestion_service
     app.state.search_service = search_service
     app.state.geocoder = geocoder
+    app.state.point_cloud_limit = settings.point_cloud_limit
 
     LOG.info('event=lifespan_init message="Сервис визуальной геолокации готов"')
 
     try:
         yield
     finally:
-        try:
-            await index.stop()
-        except Exception as exc:  # pragma: no cover - вывод логов
-            LOG.exception("event=index_stop_failed error=%s", exc)
         try:
             await database.aclose()
         except Exception as exc:  # pragma: no cover - вывод логов
