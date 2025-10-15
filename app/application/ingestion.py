@@ -20,7 +20,7 @@ from .exceptions import DuplicateImageError, FeatureExtractionError, StorageErro
 from .feature_store import FeatureStore
 from .features import LocalFeatureSet, SuperPointFeatureExtractor
 from .geocoder import Geocoder
-from .global_descriptors import GlobalDescriptor, NetVLADGlobalExtractor
+from .global_descriptors import NetVLADGlobalExtractor
 
 
 @dataclass(slots=True)
@@ -129,8 +129,10 @@ class ImageIngestionService:
             raise FeatureExtractionError("Ошибка извлечения дескрипторов") from exc
 
         stem = payload.source_name or uuid.uuid4().hex
+        unique_suffix = digest[:12]
+        artifact_stem = f"{stem}-{unique_suffix}"
         image_ext = detect_extension(payload.data)
-        image_key = self._build_image_key(stem, image_ext)
+        image_key = self._build_image_key(artifact_stem, image_ext)
 
         content_type = f"image/{image_ext}" if image_ext else "application/octet-stream"
         try:
@@ -149,7 +151,9 @@ class ImageIngestionService:
             raise StorageError("Не удалось сохранить изображение") from exc
 
         feature_key = await self._local_store.save(
-            stem, local_features, metadata={"type": "local_features"}
+            f"{artifact_stem}-local",
+            local_features,
+            metadata={"type": "local_features", "digest": digest[:16]},
         )
         image_url = self._storage.build_url(image_key)
         self._log.debug(

@@ -185,7 +185,8 @@ class ImageSearchService:
             )
 
         query_descriptor = query_global.normalized()
-        score_limit = max(self._retrieval_candidates, payload.top_k, self._max_results)
+        effective_top_k = max(1, min(payload.top_k, self._max_results))
+        score_limit = max(self._retrieval_candidates, effective_top_k)
         scored_points = await self._vector_store.search(
             query_descriptor, limit=score_limit
         )
@@ -239,13 +240,16 @@ class ImageSearchService:
             )
 
         await self._prefetch_features(
-            [record.local_feature_path for record, _ in ranked_candidates[: self._prefetch_limit]]
+            [
+                record.local_feature_path
+                for record, _ in ranked_candidates[: min(len(ranked_candidates), self._prefetch_limit)]
+            ]
         )
 
         best_heap: list[tuple[float, ImageRecord, MatchScore, float, LocalFeatureSet]] = []
         evaluated = 0
         for record, global_score in ranked_candidates:
-            if payload.top_k > 0 and len(best_heap) >= payload.top_k:
+            if effective_top_k > 0 and len(best_heap) >= effective_top_k:
                 min_conf = best_heap[0][0]
                 max_possible = (
                     self._global_weight * global_score
@@ -274,15 +278,13 @@ class ImageSearchService:
             if match_score.matches == 0:
                 continue
             evaluated += 1
-            if payload.top_k == 0:
-                continue
             entry = (confidence, record, match_score, global_score, candidate_features)
-            if len(best_heap) < payload.top_k:
+            if len(best_heap) < effective_top_k:
                 heapq.heappush(best_heap, entry)
             elif confidence > best_heap[0][0] + 1e-9:
                 heapq.heapreplace(best_heap, entry)
 
-        if payload.top_k > 0 and not best_heap:
+        if effective_top_k > 0 and not best_heap:
             self._log.info("event=no_matches_after_local_filter")
             return SearchResult(
                 query_image_key=image_key,
@@ -294,7 +296,7 @@ class ImageSearchService:
 
         selected = (
             sorted(best_heap, key=lambda item: item[0], reverse=True)
-            if payload.top_k > 0
+            if effective_top_k > 0
             else []
         )
 
@@ -353,7 +355,8 @@ class ImageSearchService:
             return LocationSearchResult(matches=[])
 
         scored.sort(key=lambda item: item[1])
-        top_records = scored[: payload.top_k]
+        limit = max(1, min(payload.top_k, self._max_results))
+        top_records = scored[:limit]
 
         matches: list[LocationMatchResult] = []
         for record, distance in top_records:

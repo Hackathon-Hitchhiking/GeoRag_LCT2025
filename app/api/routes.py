@@ -181,6 +181,7 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
     import numpy as np
 
     point_limit = getattr(request.app.state, "point_cloud_limit", 2048)
+    include_points = payload.plot_dots
 
     def _to_points(coords: np.ndarray, scores: np.ndarray) -> list[Point3D]:
         return [
@@ -188,43 +189,46 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
             for vec, score in zip(coords, scores)
         ]
 
-    _, q_coords, q_scores = result.query_local.to_point_cloud(point_limit)
-    query_point_cloud = _to_points(q_coords, q_scores)
+    query_point_cloud: list[Point3D] = []
+    if include_points:
+        _, q_coords, q_scores = result.query_local.to_point_cloud(point_limit)
+        query_point_cloud = _to_points(q_coords, q_scores)
 
     matches: list[SearchMatch] = []
     for match in result.matches:
-        _, m_coords, m_scores = match.local_features.to_point_cloud(point_limit)
-        candidate_cloud = _to_points(m_coords, m_scores)
-
-        query_indices = match.match_score.query_indices.astype(np.int32)
-        candidate_indices = match.match_score.candidate_indices.astype(np.int32)
-        query_rays = result.query_local.indices_to_rays(query_indices)
-        candidate_rays = match.local_features.indices_to_rays(candidate_indices)
-        query_scores = result.query_local.scores[query_indices]
-        candidate_scores = match.local_features.scores[candidate_indices]
-        match_scores = match.match_score.matching_scores
-
+        candidate_cloud: list[Point3D] = []
         correspondences: list[MatchCorrespondence] = []
-        for idx, (qr, cr) in enumerate(zip(query_rays, candidate_rays, strict=False)):
-            score = float(match_scores[idx]) if idx < len(match_scores) else 0.0
-            correspondences.append(
-                MatchCorrespondence(
-                    query=Point3D(
-                        x=float(qr[0]),
-                        y=float(qr[1]),
-                        z=float(qr[2]),
-                        score=float(query_scores[idx]),
-                    ),
-                    candidate=Point3D(
-                        x=float(cr[0]),
-                        y=float(cr[1]),
-                        z=float(cr[2]),
-                        score=float(candidate_scores[idx]),
-                    ),
-                    score=score,
-                )
-            )
+        if include_points:
+            _, m_coords, m_scores = match.local_features.to_point_cloud(point_limit)
+            candidate_cloud = _to_points(m_coords, m_scores)
 
+            query_indices = match.match_score.query_indices.astype(np.int32)
+            candidate_indices = match.match_score.candidate_indices.astype(np.int32)
+            query_rays = result.query_local.indices_to_rays(query_indices)
+            candidate_rays = match.local_features.indices_to_rays(candidate_indices)
+            query_scores = result.query_local.scores[query_indices]
+            candidate_scores = match.local_features.scores[candidate_indices]
+            match_scores = match.match_score.matching_scores
+
+            for idx, (qr, cr) in enumerate(zip(query_rays, candidate_rays, strict=False)):
+                score = float(match_scores[idx]) if idx < len(match_scores) else 0.0
+                correspondences.append(
+                    MatchCorrespondence(
+                        query=Point3D(
+                            x=float(qr[0]),
+                            y=float(qr[1]),
+                            z=float(qr[2]),
+                            score=float(query_scores[idx]),
+                        ),
+                        candidate=Point3D(
+                            x=float(cr[0]),
+                            y=float(cr[1]),
+                            z=float(cr[2]),
+                            score=float(candidate_scores[idx]),
+                        ),
+                        score=score,
+                    )
+                )
         matches.append(
             SearchMatch(
                 image_id=match.record.id,

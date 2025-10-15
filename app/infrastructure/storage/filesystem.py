@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:  # pragma: no cover - только для подсказок типов
+    from .s3 import S3Object
 
 
 def _sanitize_key(key: str) -> str:
@@ -61,7 +64,7 @@ class FileSystemStorage:
 
         return await asyncio.to_thread(_read)
 
-    async def load_many(self, keys: list[str]) -> list["S3Object"]:
+    async def load_many(self, keys: list[str]) -> list[S3Object]:
         from .s3 import S3Object  # локальный импорт для избежания циклов
 
         async def _load_one(item_key: str) -> S3Object:
