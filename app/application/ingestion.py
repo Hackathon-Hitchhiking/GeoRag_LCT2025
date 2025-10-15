@@ -128,19 +128,22 @@ class ImageIngestionService:
             self._log.exception("event=feature_extraction_unexpected digest=%s", digest[:16])
             raise FeatureExtractionError("Ошибка извлечения дескрипторов") from exc
 
-        stem = payload.source_name or uuid.uuid4().hex
+        stem = uuid.uuid4().hex
         unique_suffix = digest[:12]
         artifact_stem = f"{stem}-{unique_suffix}"
         image_ext = detect_extension(payload.data)
         image_key = self._build_image_key(artifact_stem, image_ext)
 
         content_type = f"image/{image_ext}" if image_ext else "application/octet-stream"
+        metadata = {"digest": digest}
+        if payload.source_name:
+            metadata["source_name"] = str(payload.source_name)
         try:
             await self._storage.save(
                 image_key,
                 payload.data,
                 content_type=content_type,
-                metadata={"digest": digest},
+                metadata=metadata,
             )
         except Exception as exc:  # pragma: no cover - IO errors
             self._log.exception(

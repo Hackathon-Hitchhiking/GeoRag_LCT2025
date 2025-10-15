@@ -102,9 +102,8 @@ class QdrantVectorStore:
             raise ValueError("Vector must be 1-D")
         result = await self._client.search(
             collection_name=self._collection,
-            vector=normalized.tolist(),
+            query_vector=normalized.tolist(),
             limit=limit,
             with_payload=True,
         )
         return list(result)
-
