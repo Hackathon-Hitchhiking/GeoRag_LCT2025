@@ -34,6 +34,9 @@ class MatchScore:
     triangulated_query_indices: np.ndarray
     triangulated_candidate_indices: np.ndarray
     triangulated_scores: np.ndarray
+    query_indices: np.ndarray
+    candidate_indices: np.ndarray
+    matching_scores: np.ndarray
 
     @property
     def match_ratio(self) -> float:
@@ -93,6 +96,9 @@ class LightGlueMatcher:
                 triangulated_query_indices=np.empty(0, dtype=np.int32),
                 triangulated_candidate_indices=np.empty(0, dtype=np.int32),
                 triangulated_scores=np.empty(0, dtype=np.float32),
+                query_indices=np.empty(0, dtype=np.int32),
+                candidate_indices=np.empty(0, dtype=np.int32),
+                matching_scores=np.empty(0, dtype=np.float32),
             )
 
         inputs = {
@@ -130,6 +136,9 @@ class LightGlueMatcher:
                 triangulated_query_indices=np.empty(0, dtype=np.int32),
                 triangulated_candidate_indices=np.empty(0, dtype=np.int32),
                 triangulated_scores=np.empty(0, dtype=np.float32),
+                query_indices=np.empty(0, dtype=np.int32),
+                candidate_indices=np.empty(0, dtype=np.int32),
+                matching_scores=np.empty(0, dtype=np.float32),
             )
 
         matched_scores = scores0[valid].detach().cpu().numpy().astype(np.float32)
@@ -254,6 +263,9 @@ class LightGlueMatcher:
             triangulated_query_indices=triangulated_query_idx,
             triangulated_candidate_indices=triangulated_candidate_idx,
             triangulated_scores=triangulated_scores,
+            query_indices=query_indices,
+            candidate_indices=candidate_indices,
+            matching_scores=matched_scores,
         )
 
     async def amatch(self, query: LocalFeatureSet, candidate: LocalFeatureSet) -> MatchScore:

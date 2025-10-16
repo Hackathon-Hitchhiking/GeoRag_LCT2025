@@ -222,6 +222,8 @@ print(scene.address, scene.description)
       "geometry_inlier_ratio": 0.57,
       "geometry_score": 0.50,
       "image_url": "https://s3.local/georag/images/42a....jpg",
+      "geometry_score": 0.50,
+      "image_url": "https://s3.local/georag/images/42a....jpg",
       "latitude": 55.75,
       "longitude": 37.61,
       "address": "Москва, Россия",
