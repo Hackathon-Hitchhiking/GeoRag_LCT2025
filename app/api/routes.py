@@ -28,11 +28,13 @@ from ..schemas import (
     ImageIngestResponse,
     LocationSearchMatch,
     LocationSearchResponse,
+    MatchCorrespondence,
+    Point3D,
     SearchMatch,
     SearchRequest,
     SearchResponse,
 )
-from ..utils.image import from_base64, to_base64
+from ..utils.image import from_base64
 
 LOG = get_logger("georag.api")
 
@@ -80,9 +82,6 @@ async def add_image(request: Request, payload: ImageIngestRequest) -> ImageInges
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     ingestion_service = _get_ingestion_service(request)
-    local_store = getattr(request.app.state, "local_store")
-    global_store = getattr(request.app.state, "global_store")
-    storage = getattr(request.app.state, "storage")
     ingestion_payload = IngestionPayload(
         data=image_bytes,
         latitude=payload.latitude,
@@ -117,9 +116,8 @@ async def add_image(request: Request, payload: ImageIngestRequest) -> ImageInges
     )
     return ImageIngestResponse(
         id=stored.record_id,
-        image_uri=storage.build_path(stored.image_key),
-        local_feature_uri=local_store.build_uri(stored.feature_key),
-        global_descriptor_uri=global_store.build_uri(stored.global_descriptor_key),
+        image_url=stored.image_url,
+        vector_id=stored.vector_id,
         latitude=stored.latitude,
         longitude=stored.longitude,
         address=stored.address,
@@ -180,19 +178,67 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
         )
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
-    query_image_bytes = result.query_bytes
-    if payload.plot_dots and result.query_local.keypoints_count:
-        query_image_bytes = await search_service.prepare_visual(
-            result.query_local, query_image_bytes
-        )
+    import numpy as np
 
-    storage = getattr(request.app.state, "storage")
-    local_store = getattr(request.app.state, "local_store")
+    point_limit = getattr(request.app.state, "point_cloud_limit", 2048)
+    include_points = payload.plot_dots
+
+    def _to_points(coords: np.ndarray, scores: np.ndarray) -> list[Point3D]:
+        return [
+            Point3D(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]), score=float(score))
+            for vec, score in zip(coords, scores)
+        ]
+
+    aggregated_coords: list[np.ndarray] = []
+    aggregated_scores: list[np.ndarray] = []
+    query_point_cloud: list[Point3D] = []
+
     matches: list[SearchMatch] = []
     for match in result.matches:
-        image_bytes = match.image_bytes
-        if payload.plot_dots:
-            image_bytes = await search_service.prepare_visual(match.local_features, image_bytes)
+        candidate_cloud: list[Point3D] = []
+        correspondences: list[MatchCorrespondence] = []
+        rotation = match.match_score.relative_rotation
+        translation = match.match_score.relative_translation
+
+        if include_points:
+            if match.match_score.triangulated_count:
+                tri_coords = match.match_score.triangulated_points[:point_limit]
+                tri_scores = match.match_score.triangulated_scores[:point_limit]
+                aggregated_coords.append(tri_coords)
+                aggregated_scores.append(tri_scores)
+
+                candidate_points = tri_coords
+                if rotation is not None and translation is not None:
+                    candidate_points = (
+                        rotation.astype(np.float32) @ tri_coords.T
+                        + translation.reshape(3, 1).astype(np.float32)
+                    ).T
+
+                candidate_cloud = _to_points(candidate_points, tri_scores)
+
+                for query_vec, candidate_vec, score in zip(
+                    tri_coords, candidate_points, tri_scores, strict=False
+                ):
+                    correspondences.append(
+                        MatchCorrespondence(
+                            query=Point3D(
+                                x=float(query_vec[0]),
+                                y=float(query_vec[1]),
+                                z=float(query_vec[2]),
+                                score=float(score),
+                            ),
+                            candidate=Point3D(
+                                x=float(candidate_vec[0]),
+                                y=float(candidate_vec[1]),
+                                z=float(candidate_vec[2]),
+                                score=float(score),
+                            ),
+                            score=float(score),
+                        )
+                    )
+            else:
+                _, m_coords, m_scores = match.local_features.to_point_cloud(point_limit)
+                candidate_cloud = _to_points(m_coords, m_scores)
         matches.append(
             SearchMatch(
                 image_id=match.record.id,
@@ -204,18 +250,36 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
                 geometry_inliers=match.match_score.inliers,
                 geometry_inlier_ratio=match.match_score.inlier_ratio,
                 geometry_score=match.match_score.geometric_strength,
-                image_uri=storage.build_path(match.record.image_key),
-                feature_uri=local_store.build_uri(match.record.feature_key),
+                image_url=match.image_url,
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                image_base64=to_base64(image_bytes),
+                point_cloud=candidate_cloud,
+                correspondences=correspondences,
+                relative_rotation=(
+                    rotation.reshape(-1).astype(float).tolist()
+                    if rotation is not None
+                    else None
+                ),
+                relative_translation=(
+                    translation.astype(float).tolist() if translation is not None else None
+                ),
             )
         )
 
+    if include_points and aggregated_coords:
+        q_coords = np.concatenate(aggregated_coords, axis=0)
+        q_scores = np.concatenate(aggregated_scores, axis=0)
+        if q_coords.shape[0] > point_limit:
+            order = np.argsort(-q_scores)[:point_limit]
+            q_coords = q_coords[order]
+            q_scores = q_scores[order]
+        query_point_cloud = _to_points(q_coords, q_scores)
+
     response = SearchResponse(
-        query_image_base64=to_base64(query_image_bytes),
+        query_image_url=result.query_image_url,
+        query_point_cloud=query_point_cloud,
         matches=matches,
     )
     LOG.info(
@@ -258,25 +322,27 @@ async def search_by_coordinates(
         LOG.info("event=search_by_coordinates_empty_db request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    storage = getattr(request.app.state, "storage")
-    local_store = getattr(request.app.state, "local_store")
-
     matches: list[LocationSearchMatch] = []
     for match in result.matches:
-        image_bytes = match.image_bytes
-        if payload.plot_dots and match.local_features is not None:
-            image_bytes = await search_service.prepare_visual(match.local_features, image_bytes)
+        point_cloud: list[Point3D] | None = None
+        if match.local_features is not None:
+            _, coords, scores = match.local_features.to_point_cloud(
+                getattr(request.app.state, "point_cloud_limit", 2048)
+            )
+            point_cloud = [
+                Point3D(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]), score=float(score))
+                for vec, score in zip(coords, scores)
+            ]
         matches.append(
             LocationSearchMatch(
                 image_id=match.record.id,
                 distance_meters=match.distance_meters,
-                image_uri=storage.build_path(match.record.image_key),
-                feature_uri=local_store.build_uri(match.record.feature_key),
+                image_url=match.image_url,
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                image_base64=to_base64(image_bytes),
+                point_cloud=point_cloud,
             )
         )
 
@@ -326,25 +392,27 @@ async def search_by_address(
         LOG.info("event=search_by_address_empty_db request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    storage = getattr(request.app.state, "storage")
-    local_store = getattr(request.app.state, "local_store")
-
     matches: list[LocationSearchMatch] = []
     for match in result.matches:
-        image_bytes = match.image_bytes
-        if payload.plot_dots and match.local_features is not None:
-            image_bytes = await search_service.prepare_visual(match.local_features, image_bytes)
+        point_cloud: list[Point3D] | None = None
+        if match.local_features is not None:
+            _, coords, scores = match.local_features.to_point_cloud(
+                getattr(request.app.state, "point_cloud_limit", 2048)
+            )
+            point_cloud = [
+                Point3D(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]), score=float(score))
+                for vec, score in zip(coords, scores)
+            ]
         matches.append(
             LocationSearchMatch(
                 image_id=match.record.id,
                 distance_meters=match.distance_meters,
-                image_uri=storage.build_path(match.record.image_key),
-                feature_uri=local_store.build_uri(match.record.feature_key),
+                image_url=match.image_url,
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                image_base64=to_base64(image_bytes),
+                point_cloud=point_cloud,
             )
         )
 

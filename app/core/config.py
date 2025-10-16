@@ -40,15 +40,41 @@ class Settings(BaseSettings):
     database_echo: bool = Field(default=False, alias="DATABASE_ECHO")
 
     # Object storage (S3 compatible)
-    s3_bucket: str = Field(default="geo-images", alias="S3_BUCKET")
-    s3_endpoint_url: str | None = Field(default=None, alias="S3_ENDPOINT_URL")
+    s3_bucket: str = Field(default="georag", alias="S3_BUCKET")
     s3_region: str | None = Field(default=None, alias="S3_REGION")
+    s3_endpoint_url: str | None = Field(default=None, alias="S3_ENDPOINT_URL")
     s3_access_key: str | None = Field(default=None, alias="S3_ACCESS_KEY")
     s3_secret_key: str | None = Field(default=None, alias="S3_SECRET_KEY")
-    s3_use_ssl: bool = Field(default=True, alias="S3_USE_SSL")
-    s3_images_prefix: str = Field(default="images", alias="S3_IMAGES_PREFIX")
-    s3_features_prefix: str = Field(default="features", alias="S3_FEATURES_PREFIX")
-    s3_global_prefix: str = Field(default="global_descriptors", alias="S3_GLOBAL_PREFIX")
+    s3_session_token: str | None = Field(default=None, alias="S3_SESSION_TOKEN")
+    s3_public_base_url: str | None = Field(default=None, alias="S3_PUBLIC_BASE_URL")
+    s3_presign_ttl: int = Field(default=3600, alias="S3_PRESIGN_TTL", ge=60, le=86400)
+    s3_max_parallel: int = Field(default=16, alias="S3_MAX_PARALLEL", ge=1, le=64)
+    image_subdir: str = Field(default="images", alias="STORAGE_IMAGE_SUBDIR")
+    feature_subdir: str = Field(default="features", alias="STORAGE_FEATURE_SUBDIR")
+    preview_subdir: str = Field(default="previews", alias="STORAGE_PREVIEW_SUBDIR")
+    query_subdir: str = Field(default="queries", alias="STORAGE_QUERY_SUBDIR")
+
+    # Local feature cache sizing
+    feature_cache_size_mb: int = Field(
+        default=1536, alias="FEATURE_CACHE_SIZE_MB", ge=128, le=16384
+    )
+    feature_cache_items: int = Field(
+        default=512, alias="FEATURE_CACHE_ITEMS", ge=8, le=16384
+    )
+
+    # Qdrant vector database
+    qdrant_url: str = Field(default="http://localhost:6333", alias="QDRANT_URL")
+    qdrant_api_key: str | None = Field(default=None, alias="QDRANT_API_KEY")
+    qdrant_collection: str = Field(
+        default="georag_images", alias="QDRANT_COLLECTION"
+    )
+    qdrant_shard_number: int = Field(
+        default=1, alias="QDRANT_SHARDS", ge=1, le=32
+    )
+    qdrant_replication_factor: int = Field(
+        default=1, alias="QDRANT_REPLICATION", ge=1, le=5
+    )
+    qdrant_on_disk: bool = Field(default=True, alias="QDRANT_ON_DISK")
 
     # Feature extraction parameters
     feature_max_keypoints: int = Field(default=4096, alias="FEATURE_MAX_KEYPOINTS")
@@ -65,9 +91,8 @@ class Settings(BaseSettings):
     geometry_score_weight: float = Field(default=0.25, alias="GEOMETRY_SCORE_WEIGHT")
     compute_device: str | None = Field(default=None, alias="COMPUTE_DEVICE")
     max_search_results: int = Field(default=50, alias="MAX_SEARCH_RESULTS")
-    index_refresh_interval: int = Field(
-        default=7200, alias="INDEX_REFRESH_INTERVAL"
-    )
+    point_cloud_limit: int = Field(default=2048, alias="POINT_CLOUD_LIMIT", ge=64, le=8192)
+    feature_prefetch_limit: int = Field(default=16, alias="FEATURE_PREFETCH_LIMIT", ge=1, le=128)
 
     # Nominatim integration
     nominatim_user_agent: str | None = Field(
