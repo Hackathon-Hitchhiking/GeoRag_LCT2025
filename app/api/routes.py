@@ -189,46 +189,56 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
             for vec, score in zip(coords, scores)
         ]
 
+    aggregated_coords: list[np.ndarray] = []
+    aggregated_scores: list[np.ndarray] = []
     query_point_cloud: list[Point3D] = []
-    if include_points:
-        _, q_coords, q_scores = result.query_local.to_point_cloud(point_limit)
-        query_point_cloud = _to_points(q_coords, q_scores)
 
     matches: list[SearchMatch] = []
     for match in result.matches:
         candidate_cloud: list[Point3D] = []
         correspondences: list[MatchCorrespondence] = []
+        rotation = match.match_score.relative_rotation
+        translation = match.match_score.relative_translation
+
         if include_points:
-            _, m_coords, m_scores = match.local_features.to_point_cloud(point_limit)
-            candidate_cloud = _to_points(m_coords, m_scores)
+            if match.match_score.triangulated_count:
+                tri_coords = match.match_score.triangulated_points[:point_limit]
+                tri_scores = match.match_score.triangulated_scores[:point_limit]
+                aggregated_coords.append(tri_coords)
+                aggregated_scores.append(tri_scores)
 
-            query_indices = match.match_score.query_indices.astype(np.int32)
-            candidate_indices = match.match_score.candidate_indices.astype(np.int32)
-            query_rays = result.query_local.indices_to_rays(query_indices)
-            candidate_rays = match.local_features.indices_to_rays(candidate_indices)
-            query_scores = result.query_local.scores[query_indices]
-            candidate_scores = match.local_features.scores[candidate_indices]
-            match_scores = match.match_score.matching_scores
+                candidate_points = tri_coords
+                if rotation is not None and translation is not None:
+                    candidate_points = (
+                        rotation.astype(np.float32) @ tri_coords.T
+                        + translation.reshape(3, 1).astype(np.float32)
+                    ).T
 
-            for idx, (qr, cr) in enumerate(zip(query_rays, candidate_rays, strict=False)):
-                score = float(match_scores[idx]) if idx < len(match_scores) else 0.0
-                correspondences.append(
-                    MatchCorrespondence(
-                        query=Point3D(
-                            x=float(qr[0]),
-                            y=float(qr[1]),
-                            z=float(qr[2]),
-                            score=float(query_scores[idx]),
-                        ),
-                        candidate=Point3D(
-                            x=float(cr[0]),
-                            y=float(cr[1]),
-                            z=float(cr[2]),
-                            score=float(candidate_scores[idx]),
-                        ),
-                        score=score,
+                candidate_cloud = _to_points(candidate_points, tri_scores)
+
+                for query_vec, candidate_vec, score in zip(
+                    tri_coords, candidate_points, tri_scores, strict=False
+                ):
+                    correspondences.append(
+                        MatchCorrespondence(
+                            query=Point3D(
+                                x=float(query_vec[0]),
+                                y=float(query_vec[1]),
+                                z=float(query_vec[2]),
+                                score=float(score),
+                            ),
+                            candidate=Point3D(
+                                x=float(candidate_vec[0]),
+                                y=float(candidate_vec[1]),
+                                z=float(candidate_vec[2]),
+                                score=float(score),
+                            ),
+                            score=float(score),
+                        )
                     )
-                )
+            else:
+                _, m_coords, m_scores = match.local_features.to_point_cloud(point_limit)
+                candidate_cloud = _to_points(m_coords, m_scores)
         matches.append(
             SearchMatch(
                 image_id=match.record.id,
@@ -247,8 +257,25 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
                 metadata=match.record.metadata_json,
                 point_cloud=candidate_cloud,
                 correspondences=correspondences,
+                relative_rotation=(
+                    rotation.reshape(-1).astype(float).tolist()
+                    if rotation is not None
+                    else None
+                ),
+                relative_translation=(
+                    translation.astype(float).tolist() if translation is not None else None
+                ),
             )
         )
+
+    if include_points and aggregated_coords:
+        q_coords = np.concatenate(aggregated_coords, axis=0)
+        q_scores = np.concatenate(aggregated_scores, axis=0)
+        if q_coords.shape[0] > point_limit:
+            order = np.argsort(-q_scores)[:point_limit]
+            q_coords = q_coords[order]
+            q_scores = q_scores[order]
+        query_point_cloud = _to_points(q_coords, q_scores)
 
     response = SearchResponse(
         query_image_url=result.query_image_url,

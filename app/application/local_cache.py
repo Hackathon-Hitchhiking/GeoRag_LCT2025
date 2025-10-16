@@ -55,6 +55,21 @@ class LocalFeatureCache:
                 self._locks.pop(key, None)
             return loaded
 
+    async def peek(self, key: str) -> LocalFeatureSet | None:
+        """Вернуть элемент, если он уже есть в кеше."""
+
+        async with self._order_lock:
+            return self._cache.get(key)
+
+    async def store(self, key: str, value: LocalFeatureSet) -> None:
+        """Поместить готовый набор признаков в кеш."""
+
+        async with self._order_lock:
+            self._cache[key] = value
+            while len(self._cache) > self._max_items:
+                self._cache.popitem()
+            self._locks.pop(key, None)
+
     async def invalidate(self, key: str) -> None:
         async with self._order_lock:
             self._cache.pop(key, None)

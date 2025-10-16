@@ -103,6 +103,8 @@ class SearchMatch(BaseModel):
     metadata: dict[str, Any] | None
     point_cloud: list[Point3D]
     correspondences: list[MatchCorrespondence]
+    relative_rotation: list[float] | None = None
+    relative_translation: list[float] | None = None
 
 
 class SearchResponse(BaseModel):

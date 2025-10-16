@@ -47,6 +47,33 @@ class LocalFeatureSet:
         """Количество найденных ключевых точек."""
         return int(self.keypoints.shape[0])
 
+    def camera_matrix(self) -> np.ndarray:
+        """Оценить матрицу камеры, предполагая pinhole-модель."""
+
+        height, width = self.image_size
+        focal = float(max(width, height))
+        cx = (float(width) - 1.0) / 2.0
+        cy = (float(height) - 1.0) / 2.0
+        return np.array(
+            [[focal, 0.0, cx], [0.0, focal, cy], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+
+    def normalized_keypoints(self, indices: np.ndarray | None = None) -> np.ndarray:
+        """Преобразовать пиксельные координаты в нормализованные лучи."""
+
+        if indices is None:
+            points = self.keypoints
+        else:
+            if indices.size == 0:
+                return np.empty((0, 2), dtype=np.float32)
+            points = self.keypoints[indices]
+        matrix = self.camera_matrix()
+        normalized = cv2.undistortPoints(
+            points.reshape(-1, 1, 2).astype(np.float64), matrix, None
+        )
+        return normalized.reshape(-1, 2).astype(np.float32)
+
     def to_bytes(self) -> bytes:
         """Сериализовать признаки в компактный бинарный формат."""
         buffer = io.BytesIO()
