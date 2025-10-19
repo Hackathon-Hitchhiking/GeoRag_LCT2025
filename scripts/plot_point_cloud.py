@@ -57,7 +57,6 @@ def _scatter_points(
     ys: np.ndarray,
     zs: np.ndarray,
     point_size: float,
-    title: str,
 ) -> plt.Figure:
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection="3d")
@@ -82,13 +81,9 @@ def _scatter_points(
         alpha=0.9,
     )
 
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_title(title)
+    ax.set_axis_off()
     ax.view_init(elev=30, azim=45)
     ax.grid(False)
-    fig.colorbar(scatter, ax=ax, label="Relative depth")
     return fig
 
 
@@ -118,8 +113,7 @@ def visualize_depth_points(args: argparse.Namespace) -> None:
     xs = np.array([point.x for point in points], dtype=np.float32)
     ys = np.array([point.y for point in points], dtype=np.float32)
     zs = np.array([point.z for point in points], dtype=np.float32)
-    title = f"Depth Anything V2 — {args.image.name}"
-    fig = _scatter_points(xs, ys, zs, args.point_size, title)
+    fig = _scatter_points(xs, ys, zs, args.point_size)
 
     if args.save is not None:
         fig.savefig(args.save, dpi=200, bbox_inches="tight")
