@@ -72,10 +72,11 @@ class SearchRequest(BaseModel):
 
 
 class Point3D(BaseModel):
+    """Описание точки облака в трёхмерном пространстве."""
+
     x: float
     y: float
     z: float
-    score: float
 
 
 class MatchCorrespondence(BaseModel):

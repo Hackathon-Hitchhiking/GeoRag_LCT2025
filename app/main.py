@@ -12,6 +12,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .api.routes import router as api_router
+from .application.depth_anything import DepthAnythingPointCloudGenerator
 from .application.feature_store import FeatureStore
 from .application.features import LocalFeatureSet, SuperPointFeatureExtractor
 from .application.geocoder import Geocoder
@@ -114,6 +115,19 @@ async def lifespan(app: FastAPI):
         prefetch_limit=settings.feature_prefetch_limit,
     )
 
+    depth_generator: DepthAnythingPointCloudGenerator | None = None
+    try:
+        depth_generator = DepthAnythingPointCloudGenerator(
+            repo_id=settings.depth_model_repo,
+            filename=settings.depth_model_filename,
+            device=device,
+            default_sample_step=settings.depth_sample_step,
+        )
+    except ImportError as exc:
+        LOG.warning("event=depth_generator_disabled reason=%s", exc)
+    except Exception as exc:  # pragma: no cover - инициализация может падать на GPU
+        LOG.exception("event=depth_generator_failed error=%s", exc)
+
     app.state.database = database
     app.state.storage = storage
     app.state.local_store = local_store
@@ -123,6 +137,7 @@ async def lifespan(app: FastAPI):
     app.state.search_service = search_service
     app.state.geocoder = geocoder
     app.state.point_cloud_limit = settings.point_cloud_limit
+    app.state.depth_generator = depth_generator
 
     LOG.info('event=lifespan_init message="Сервис визуальной геолокации готов"')
 

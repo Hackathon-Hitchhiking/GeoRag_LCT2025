@@ -1,118 +1,128 @@
-"""Визуализация 3D-точек из ответа API поиска."""
+"""Интерактивная визуализация облака точек Depth Anything V2."""
 
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
-from typing import Any
 
+import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
-
-def _load_response(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+from app.application.depth_anything import DepthAnythingPointCloudGenerator
 
 
-def _extract_points(payload: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
-    coords = np.array([[p["x"], p["y"], p["z"]] for p in payload], dtype=np.float32)
-    scores = np.array([p.get("score", 0.0) for p in payload], dtype=np.float32)
-    return coords, scores
-
-
-def _transform_candidate(
-    points: np.ndarray,
-    rotation: list[float] | None,
-    translation: list[float] | None,
-    to_query: bool,
-) -> np.ndarray:
-    if not points.size or rotation is None or translation is None:
-        return points
-    rot = np.asarray(rotation, dtype=np.float32)
-    if rot.size == 9:
-        rot = rot.reshape(3, 3)
-    elif rot.size == 16:
-        rot = rot.reshape(4, 4)[:3, :3]
-    else:
-        raise ValueError("rotation must contain 9 or 16 values")
-    t = np.asarray(translation, dtype=np.float32).reshape(3)
-    if to_query:
-        return (rot.T @ (points.T - t.reshape(3, 1))).T
-    return (rot @ points.T + t.reshape(3, 1)).T
-
-
-def plot_point_cloud(
-    response: dict[str, Any],
-    *,
-    match_index: int,
-    limit: int | None,
-    save_path: Path | None,
-) -> None:
-    matches = response.get("matches") or []
-    if not matches:
-        raise ValueError("Ответ не содержит совпадений")
-    if match_index < 0 or match_index >= len(matches):
-        raise ValueError(f"match_index должен быть от 0 до {len(matches) - 1}")
-
-    query_coords, query_scores = _extract_points(response.get("query_point_cloud", []))
-    if limit is not None and query_coords.shape[0] > limit:
-        order = np.argsort(-query_scores)[:limit]
-        query_coords = query_coords[order]
-        query_scores = query_scores[order]
-
-    match = matches[match_index]
-    candidate_coords, candidate_scores = _extract_points(match.get("point_cloud", []))
-    if limit is not None and candidate_coords.shape[0] > limit:
-        order = np.argsort(-candidate_scores)[:limit]
-        candidate_coords = candidate_coords[order]
-        candidate_scores = candidate_scores[order]
-
-    candidate_in_query = _transform_candidate(
-        candidate_coords,
-        match.get("relative_rotation"),
-        match.get("relative_translation"),
-        to_query=True,
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Построить облако точек Depth Anything V2 и визуализировать его в 3D"
+        )
     )
+    parser.add_argument("image", type=Path, help="Путь к входному изображению")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Устройство для инференса (cuda, mps или cpu)",
+    )
+    parser.add_argument(
+        "--max-points",
+        type=int,
+        default=50000,
+        help="Максимальное количество точек в облаке",
+    )
+    parser.add_argument(
+        "--step",
+        type=int,
+        default=None,
+        help="Явный шаг дискретизации пикселей (по умолчанию вычисляется автоматически)",
+    )
+    parser.add_argument(
+        "--save",
+        type=Path,
+        default=None,
+        help="Путь для сохранения изображения вместо открытия интерактивного окна",
+    )
+    parser.add_argument(
+        "--point-size",
+        type=float,
+        default=1.5,
+        help="Размер точек на графике",
+    )
+    return parser
 
+
+def _scatter_points(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    zs: np.ndarray,
+    point_size: float,
+    title: str,
+) -> plt.Figure:
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection="3d")
 
-    if query_coords.size:
-        ax.scatter(
-            query_coords[:, 0],
-            query_coords[:, 1],
-            query_coords[:, 2],
-            c=query_scores,
-            cmap="viridis",
-            s=8,
-            alpha=0.9,
-            label="Query",
-        )
+    if zs.size == 0:
+        color_values = zs
+    else:
+        depth_min = float(np.min(zs))
+        depth_max = float(np.max(zs))
+        if np.isclose(depth_min, depth_max):
+            color_values = np.zeros_like(zs)
+        else:
+            color_values = (zs - depth_min) / (depth_max - depth_min)
 
-    if candidate_in_query.size:
-        ax.scatter(
-            candidate_in_query[:, 0],
-            candidate_in_query[:, 1],
-            candidate_in_query[:, 2],
-            c=candidate_scores,
-            cmap="plasma",
-            s=8,
-            alpha=0.6,
-            label=f"Match #{match_index}",
-        )
+    scatter = ax.scatter(
+        xs,
+        ys,
+        zs,
+        c=color_values,
+        cmap="viridis",
+        s=point_size,
+        alpha=0.9,
+    )
 
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
-    ax.legend(loc="upper right")
-    ax.set_title("3D Reconstruction from Matches")
+    ax.set_title(title)
     ax.view_init(elev=30, azim=45)
     ax.grid(False)
+    fig.colorbar(scatter, ax=ax, label="Relative depth")
+    return fig
 
-    if save_path is not None:
-        fig.savefig(save_path, bbox_inches="tight", dpi=200)
+
+def visualize_depth_points(args: argparse.Namespace) -> None:
+    if not args.image.exists():
+        raise FileNotFoundError(f"Файл {args.image} не найден")
+
+    image = cv2.imread(str(args.image))
+    if image is None:
+        raise ValueError(f"Не удалось открыть изображение {args.image}")
+
+    try:
+        generator = DepthAnythingPointCloudGenerator(device=args.device)
+    except ImportError as exc:  # pragma: no cover - информируем пользователя CLI
+        raise RuntimeError(
+            "Не установлены зависимости depth-anything-v2 и huggingface-hub"
+        ) from exc
+    points = generator.generate_point_cloud(
+        image,
+        sample_step=args.step,
+        max_points=args.max_points,
+    )
+
+    if not points:
+        raise RuntimeError("Модель не вернула ни одной точки")
+
+    xs = np.array([point.x for point in points], dtype=np.float32)
+    ys = np.array([point.y for point in points], dtype=np.float32)
+    zs = np.array([point.z for point in points], dtype=np.float32)
+    title = f"Depth Anything V2 — {args.image.name}"
+    fig = _scatter_points(xs, ys, zs, args.point_size, title)
+
+    if args.save is not None:
+        fig.savefig(args.save, dpi=200, bbox_inches="tight")
     else:
         plt.show()
 
@@ -120,32 +130,9 @@ def plot_point_cloud(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Plot 3D points from search response")
-    parser.add_argument("response", type=Path, help="Путь до JSON с ответом поиска")
-    parser.add_argument(
-        "--match-index", type=int, default=0, help="Номер совпадения для визуализации"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Ограничение количества точек для отображения",
-    )
-    parser.add_argument(
-        "--save",
-        type=Path,
-        default=None,
-        help="Путь для сохранения изображения вместо интерактивного окна",
-    )
+    parser = _build_parser()
     args = parser.parse_args()
-
-    response = _load_response(args.response)
-    plot_point_cloud(
-        response,
-        match_index=args.match_index,
-        limit=args.limit,
-        save_path=args.save,
-    )
+    visualize_depth_points(args)
 
 
 if __name__ == "__main__":
