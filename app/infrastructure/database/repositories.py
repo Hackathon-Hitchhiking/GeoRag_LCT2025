@@ -38,6 +38,13 @@ class ImageRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_by_ids(self, ids: Sequence[int]) -> Sequence[ImageRecord]:
+        if not ids:
+            return []
+        stmt = select(ImageRecord).where(ImageRecord.id.in_(ids))
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def find_by_hash(self, image_hash: str) -> ImageRecord | None:
         """Найти запись по хэшу изображения."""
         stmt = select(ImageRecord).where(ImageRecord.image_hash == image_hash)

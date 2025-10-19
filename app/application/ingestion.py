@@ -12,15 +12,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..infrastructure.database.repositories import ImageRepository
 from ..infrastructure.database.session import Database
-from ..infrastructure.storage.s3 import S3Storage
+from ..infrastructure.storage import S3Storage
+from ..infrastructure.vector.qdrant import QdrantVectorStore
+from ..infrastructure.storage import S3Storage
+from ..infrastructure.vector.qdrant import QdrantVectorStore
 from ..logging import get_logger
 from ..utils.image import decode_image, detect_extension
 from .exceptions import DuplicateImageError, FeatureExtractionError, StorageError
 from .feature_store import FeatureStore
 from .features import LocalFeatureSet, SuperPointFeatureExtractor
 from .geocoder import Geocoder
-from .global_descriptors import GlobalDescriptor, NetVLADGlobalExtractor
-from .index import ImageFeatureIndex
+from .global_descriptors import NetVLADGlobalExtractor
+from .global_descriptors import NetVLADGlobalExtractor
 
 
 @dataclass(slots=True)
@@ -39,9 +42,14 @@ class StoredImage:
     """Результат успешного добавления изображения."""
 
     record_id: int
-    image_key: str
-    feature_key: str
-    global_descriptor_key: str
+    image_path: str
+    image_url: str
+    feature_path: str
+    vector_id: str
+    image_path: str
+    image_url: str
+    feature_path: str
+    vector_id: str
     latitude: float | None
     longitude: float | None
     address: str | None
@@ -66,20 +74,19 @@ class ImageIngestionService:
         database: Database,
         storage: S3Storage,
         local_store: FeatureStore[LocalFeatureSet],
-        global_store: FeatureStore[GlobalDescriptor],
         local_extractor: SuperPointFeatureExtractor,
         global_extractor: NetVLADGlobalExtractor,
         geocoder: Geocoder,
+        vector_store: QdrantVectorStore,
+        vector_store: QdrantVectorStore,
         image_prefix: str,
         local_feature_type: str,
         global_descriptor_type: str,
         matcher_type: str,
-        index: ImageFeatureIndex | None = None,
     ) -> None:
         self._database = database
         self._storage = storage
         self._local_store = local_store
-        self._global_store = global_store
         self._local_extractor = local_extractor
         self._global_extractor = global_extractor
         self._geocoder = geocoder
@@ -88,7 +95,8 @@ class ImageIngestionService:
         self._global_descriptor_type = global_descriptor_type
         self._matcher_type = matcher_type
         self._log = get_logger("georag.ingestion")
-        self._index = index
+        self._vector_store = vector_store
+        self._vector_store = vector_store
 
     async def ingest(self, payload: IngestionPayload) -> StoredImage:
         """Добавить изображение в базу и вернуть описание."""
@@ -106,8 +114,6 @@ class ImageIngestionService:
                 raise DuplicateImageError("Изображение уже было загружено")
             record = await self._persist(payload, digest, session)
             await session.commit()
-        if self._index is not None:
-            await self._index.request_refresh()
         self._log.info("event=ingest_completed record_id=%s digest=%s", record.record_id, digest[:16])
         return record
 
@@ -132,16 +138,22 @@ class ImageIngestionService:
             raise FeatureExtractionError("Ошибка извлечения дескрипторов") from exc
 
         stem = payload.source_name or uuid.uuid4().hex
+        unique_suffix = digest[:12]
+        artifact_stem = f"{stem}-{unique_suffix}"
         image_ext = detect_extension(payload.data)
-        image_key = self._build_image_key(stem, image_ext)
+        image_key = self._build_image_key(artifact_stem, image_ext)
+        image_key = self._build_image_key(artifact_stem, image_ext)
 
+        content_type = f"image/{image_ext}" if image_ext else "application/octet-stream"
         try:
-            await self._storage.upload(
-                key=image_key,
-                data=payload.data,
-                content_type=f"image/{image_ext}",
+            await self._storage.save(
+                image_key,
+                payload.data,
+                content_type=content_type,
+                metadata={"digest": digest},
             )
-        except Exception as exc:  # pragma: no cover - S3 ошибки
+        except Exception as exc:  # pragma: no cover - IO errors
+        except Exception as exc:  # pragma: no cover - IO errors
             self._log.exception(
                 "event=image_upload_failed digest=%s image_key=%s",
                 digest[:16],
@@ -150,25 +162,35 @@ class ImageIngestionService:
             raise StorageError("Не удалось сохранить изображение") from exc
 
         feature_key = await self._local_store.save(
-            stem, local_features, metadata={"type": "local_features"}
+            f"{artifact_stem}-local",
+            local_features,
+            metadata={"type": "local_features", "digest": digest[:16]},
+            f"{artifact_stem}-local",
+            local_features,
+            metadata={"type": "local_features", "digest": digest[:16]},
         )
-        global_key = await self._global_store.save(
-            stem, global_descriptor, metadata={"type": "global_descriptor"}
-        )
+        image_url = self._storage.build_url(image_key)
+        image_url = self._storage.build_url(image_key)
         self._log.debug(
-            "event=artifacts_saved digest=%s image_key=%s local_key=%s global_key=%s",
+            "event=artifacts_saved digest=%s image_key=%s local_key=%s",
+            "event=artifacts_saved digest=%s image_key=%s local_key=%s",
             digest[:16],
             image_key,
             feature_key,
-            global_key,
         )
         address = await self._geocoder.reverse(payload.latitude, payload.longitude)
 
+        vector_id = uuid.uuid4().hex
+        vector_id = uuid.uuid4().hex
         values = {
-            "image_key": image_key,
-            "feature_key": feature_key,
-            "global_descriptor_key": global_key,
-            "preview_key": None,
+            "vector_id": vector_id,
+            "image_path": image_key,
+            "local_feature_path": feature_key,
+            "preview_path": None,
+            "vector_id": vector_id,
+            "image_path": image_key,
+            "local_feature_path": feature_key,
+            "preview_path": None,
             "latitude": payload.latitude,
             "longitude": payload.longitude,
             "address": address,
@@ -178,18 +200,52 @@ class ImageIngestionService:
             "descriptor_dim": local_features.descriptors.shape[1],
             "keypoint_count": local_features.keypoints_count,
             "global_descriptor_dim": global_descriptor.dimension,
-            "global_descriptor": global_descriptor.to_database_blob(),
             "local_feature_type": self._local_feature_type,
             "global_descriptor_type": self._global_descriptor_type,
             "matcher_type": self._matcher_type,
         }
         repo = ImageRepository(session)
         record = await repo.create(values)
+
+        vector_payload = {
+            "record_id": int(record.id),
+            "image_path": image_key,
+            "feature_path": feature_key,
+            "latitude": payload.latitude,
+            "longitude": payload.longitude,
+            "descriptor_dim": local_features.descriptor_dim,
+            "keypoints": local_features.keypoints_count,
+        }
+        await self._vector_store.upsert(
+            point_id=vector_id,
+            vector=global_descriptor.normalized(),
+            payload=vector_payload,
+        )
+
+        vector_payload = {
+            "record_id": int(record.id),
+            "image_path": image_key,
+            "feature_path": feature_key,
+            "latitude": payload.latitude,
+            "longitude": payload.longitude,
+            "descriptor_dim": local_features.descriptor_dim,
+            "keypoints": local_features.keypoints_count,
+        }
+        await self._vector_store.upsert(
+            point_id=vector_id,
+            vector=global_descriptor.normalized(),
+            payload=vector_payload,
+        )
         return StoredImage(
             record_id=record.id,
-            image_key=image_key,
-            feature_key=feature_key,
-            global_descriptor_key=global_key,
+            image_path=image_key,
+            image_url=image_url,
+            feature_path=feature_key,
+            vector_id=vector_id,
+            image_path=image_key,
+            image_url=image_url,
+            feature_path=feature_key,
+            vector_id=vector_id,
             latitude=record.latitude,
             longitude=record.longitude,
             address=record.address,

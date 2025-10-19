@@ -30,9 +30,8 @@ class ImageIngestResponse(BaseModel):
     """Ответ после успешной загрузки изображения."""
 
     id: int
-    image_uri: str
-    local_feature_uri: str
-    global_descriptor_uri: str
+    image_url: str
+    vector_id: str
     latitude: float | None
     longitude: float | None
     address: str | None
@@ -72,6 +71,20 @@ class SearchRequest(BaseModel):
         return value
 
 
+class Point3D(BaseModel):
+    """Описание точки облака в трёхмерном пространстве."""
+
+    x: float
+    y: float
+    z: float
+
+
+class MatchCorrespondence(BaseModel):
+    query: Point3D
+    candidate: Point3D
+    score: float
+
+
 class SearchMatch(BaseModel):
     """Описание одного совпадения из базы."""
 
@@ -84,19 +97,22 @@ class SearchMatch(BaseModel):
     geometry_inliers: int
     geometry_inlier_ratio: float
     geometry_score: float
-    image_uri: str
-    feature_uri: str
+    image_url: str
     latitude: float | None
     longitude: float | None
     address: str | None
     metadata: dict[str, Any] | None
-    image_base64: str
+    point_cloud: list[Point3D]
+    correspondences: list[MatchCorrespondence]
+    relative_rotation: list[float] | None = None
+    relative_translation: list[float] | None = None
 
 
 class SearchResponse(BaseModel):
     """Ответ поиска с подготовленными изображениями."""
 
-    query_image_base64: str
+    query_image_url: str
+    query_point_cloud: list[Point3D]
     matches: list[SearchMatch]
 
 
@@ -147,13 +163,12 @@ class LocationSearchMatch(BaseModel):
 
     image_id: int
     distance_meters: float = Field(..., ge=0)
-    image_uri: str
-    feature_uri: str
+    image_url: str
     latitude: float | None
     longitude: float | None
     address: str | None
     metadata: dict[str, Any] | None
-    image_base64: str
+    point_cloud: list[Point3D] | None = None
 
 
 class LocationSearchResponse(BaseModel):

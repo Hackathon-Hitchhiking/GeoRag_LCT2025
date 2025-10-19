@@ -6,6 +6,8 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from ..application.depth_anything import DepthAnythingPointCloudGenerator
+
 from ..application.exceptions import (
     DuplicateImageError,
     EmptyDatabaseError,
@@ -28,11 +30,12 @@ from ..schemas import (
     ImageIngestResponse,
     LocationSearchMatch,
     LocationSearchResponse,
+    Point3D,
     SearchMatch,
     SearchRequest,
     SearchResponse,
 )
-from ..utils.image import from_base64, to_base64
+from ..utils.image import decode_image, from_base64
 
 LOG = get_logger("georag.api")
 
@@ -51,6 +54,12 @@ def _get_search_service(request: Request) -> ImageSearchService:
     if service is None:
         raise RuntimeError("Search service не инициализирован")
     return service
+
+
+def _get_depth_generator(
+    request: Request,
+) -> DepthAnythingPointCloudGenerator | None:
+    return getattr(request.app.state, "depth_generator", None)
 
 
 @router.get("/health", summary="Проверка готовности")
@@ -80,9 +89,6 @@ async def add_image(request: Request, payload: ImageIngestRequest) -> ImageInges
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     ingestion_service = _get_ingestion_service(request)
-    local_store = getattr(request.app.state, "local_store")
-    global_store = getattr(request.app.state, "global_store")
-    storage = getattr(request.app.state, "storage")
     ingestion_payload = IngestionPayload(
         data=image_bytes,
         latitude=payload.latitude,
@@ -117,9 +123,8 @@ async def add_image(request: Request, payload: ImageIngestRequest) -> ImageInges
     )
     return ImageIngestResponse(
         id=stored.record_id,
-        image_uri=storage.build_path(stored.image_key),
-        local_feature_uri=local_store.build_uri(stored.feature_key),
-        global_descriptor_uri=global_store.build_uri(stored.global_descriptor_key),
+        image_url=stored.image_url,
+        vector_id=stored.vector_id,
         latitude=stored.latitude,
         longitude=stored.longitude,
         address=stored.address,
@@ -180,19 +185,50 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
         )
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
-    query_image_bytes = result.query_bytes
-    if payload.plot_dots and result.query_local.keypoints_count:
-        query_image_bytes = await search_service.prepare_visual(
-            result.query_local, query_image_bytes
-        )
+    point_limit = getattr(request.app.state, "point_cloud_limit", 2048)
+    include_points = payload.plot_dots
+    query_point_cloud: list[Point3D] = []
+    depth_generator = _get_depth_generator(request) if include_points else None
+    if include_points:
+        if depth_generator is None:
+            LOG.warning("event=depth_generator_unavailable request_id=%s", request_id)
+        else:
+            try:
+                query_image = decode_image(query_bytes)
+            except ValueError as exc:
+                LOG.warning(
+                    "event=query_decode_failed request_id=%s error=%s",
+                    request_id,
+                    exc,
+                )
+            else:
+                try:
+                    depth_points = depth_generator.generate_point_cloud(
+                        query_image,
+                        max_points=point_limit,
+                    )
+                except Exception as exc:  # pragma: no cover - обработка ошибок модели
+                    LOG.exception(
+                        "event=depth_generation_failed request_id=%s error=%s",
+                        request_id,
+                        exc,
+                    )
+                else:
+                    if point_limit > 0:
+                        depth_points = depth_points[:point_limit]
+                    query_point_cloud = [
+                        Point3D(
+                            x=pt.x,
+                            y=pt.y,
+                            z=pt.z,
+                        )
+                        for pt in depth_points
+                    ]
 
-    storage = getattr(request.app.state, "storage")
-    local_store = getattr(request.app.state, "local_store")
     matches: list[SearchMatch] = []
     for match in result.matches:
-        image_bytes = match.image_bytes
-        if payload.plot_dots:
-            image_bytes = await search_service.prepare_visual(match.local_features, image_bytes)
+        rotation = match.match_score.relative_rotation
+        translation = match.match_score.relative_translation
         matches.append(
             SearchMatch(
                 image_id=match.record.id,
@@ -204,18 +240,27 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
                 geometry_inliers=match.match_score.inliers,
                 geometry_inlier_ratio=match.match_score.inlier_ratio,
                 geometry_score=match.match_score.geometric_strength,
-                image_uri=storage.build_path(match.record.image_key),
-                feature_uri=local_store.build_uri(match.record.feature_key),
+                image_url=match.image_url,
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                image_base64=to_base64(image_bytes),
+                point_cloud=[],
+                correspondences=[],
+                relative_rotation=(
+                    rotation.reshape(-1).astype(float).tolist()
+                    if rotation is not None
+                    else None
+                ),
+                relative_translation=(
+                    translation.astype(float).tolist() if translation is not None else None
+                ),
             )
         )
 
     response = SearchResponse(
-        query_image_base64=to_base64(query_image_bytes),
+        query_image_url=result.query_image_url,
+        query_point_cloud=query_point_cloud,
         matches=matches,
     )
     LOG.info(
@@ -258,25 +303,18 @@ async def search_by_coordinates(
         LOG.info("event=search_by_coordinates_empty_db request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    storage = getattr(request.app.state, "storage")
-    local_store = getattr(request.app.state, "local_store")
-
     matches: list[LocationSearchMatch] = []
     for match in result.matches:
-        image_bytes = match.image_bytes
-        if payload.plot_dots and match.local_features is not None:
-            image_bytes = await search_service.prepare_visual(match.local_features, image_bytes)
         matches.append(
             LocationSearchMatch(
                 image_id=match.record.id,
                 distance_meters=match.distance_meters,
-                image_uri=storage.build_path(match.record.image_key),
-                feature_uri=local_store.build_uri(match.record.feature_key),
+                image_url=match.image_url,
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                image_base64=to_base64(image_bytes),
+                point_cloud=None,
             )
         )
 
@@ -326,25 +364,18 @@ async def search_by_address(
         LOG.info("event=search_by_address_empty_db request_id=%s", request_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    storage = getattr(request.app.state, "storage")
-    local_store = getattr(request.app.state, "local_store")
-
     matches: list[LocationSearchMatch] = []
     for match in result.matches:
-        image_bytes = match.image_bytes
-        if payload.plot_dots and match.local_features is not None:
-            image_bytes = await search_service.prepare_visual(match.local_features, image_bytes)
         matches.append(
             LocationSearchMatch(
                 image_id=match.record.id,
                 distance_meters=match.distance_meters,
-                image_uri=storage.build_path(match.record.image_key),
-                feature_uri=local_store.build_uri(match.record.feature_key),
+                image_url=match.image_url,
                 latitude=match.record.latitude,
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                image_base64=to_base64(image_bytes),
+                point_cloud=None,
             )
         )
 
