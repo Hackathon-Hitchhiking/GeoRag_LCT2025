@@ -10,15 +10,8 @@ import numpy as np
 import torch
 from PIL import Image
 
-try:  # pragma: no cover - опциональные зависимости проверяются во время запуска
-    from depth_anything_v2.dpt import DepthAnythingV2
-except ModuleNotFoundError:  # pragma: no cover - в тестовой среде модель может отсутствовать
-    DepthAnythingV2 = None  # type: ignore[assignment]
-
-try:  # pragma: no cover - аналогично загрузчику весов
-    from huggingface_hub import hf_hub_download
-except ModuleNotFoundError:  # pragma: no cover
-    hf_hub_download = None  # type: ignore[assignment]
+from depth_anything_v2.dpt import DepthAnythingV2
+from huggingface_hub import hf_hub_download
 
 
 @dataclass(slots=True)
