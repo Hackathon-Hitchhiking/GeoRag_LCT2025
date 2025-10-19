@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     max_search_results: int = Field(default=50, alias="MAX_SEARCH_RESULTS")
     point_cloud_limit: int = Field(default=2048, alias="POINT_CLOUD_LIMIT", ge=64, le=8192)
     feature_prefetch_limit: int = Field(default=16, alias="FEATURE_PREFETCH_LIMIT", ge=1, le=128)
+    depth_model_repo: str = Field(
+        default="depth-anything/Depth-Anything-V2-Large", alias="DEPTH_MODEL_REPO"
+    )
+    depth_model_filename: str = Field(
+        default="depth_anything_v2_vitl.pth", alias="DEPTH_MODEL_FILENAME"
+    )
+    depth_sample_step: int = Field(default=4, alias="DEPTH_SAMPLE_STEP", ge=1, le=64)
 
     # Nominatim integration
     nominatim_user_agent: str | None = Field(
