@@ -1,10 +1,12 @@
 """Интерактивная визуализация облака точек Depth Anything V2."""
+"""Интерактивная визуализация облака точек Depth Anything V2."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
+import cv2
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -126,10 +128,30 @@ def _scatter_points(
         s=point_size,
         alpha=0.9,
     )
+    if zs.size == 0:
+        color_values = zs
+    else:
+        depth_min = float(np.min(zs))
+        depth_max = float(np.max(zs))
+        if np.isclose(depth_min, depth_max):
+            color_values = np.zeros_like(zs)
+        else:
+            color_values = (zs - depth_min) / (depth_max - depth_min)
+
+    scatter = ax.scatter(
+        xs,
+        ys,
+        zs,
+        c=color_values,
+        cmap="viridis",
+        s=point_size,
+        alpha=0.9,
+    )
 
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
+    ax.set_title(title)
     ax.set_title(title)
     ax.view_init(elev=30, azim=45)
     ax.grid(False)
@@ -196,7 +218,9 @@ def visualize_depth_points(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = _build_parser()
+    parser = _build_parser()
     args = parser.parse_args()
+    visualize_depth_points(args)
     visualize_depth_points(args)
 
 

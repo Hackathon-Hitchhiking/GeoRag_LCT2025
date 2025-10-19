@@ -155,6 +155,7 @@ async def lifespan(app: FastAPI):
     app.state.geocoder = geocoder
     app.state.point_cloud_limit = settings.point_cloud_limit
     app.state.depth_generator = depth_generator
+    app.state.depth_generator = depth_generator
 
     LOG.info('event=lifespan_init message="Сервис визуальной геолокации готов"')
 
