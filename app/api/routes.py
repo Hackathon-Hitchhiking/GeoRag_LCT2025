@@ -6,6 +6,8 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from ..application.depth_anything import DepthAnythingPointCloudGenerator
+
 from ..application.exceptions import (
     DuplicateImageError,
     EmptyDatabaseError,
@@ -28,13 +30,12 @@ from ..schemas import (
     ImageIngestResponse,
     LocationSearchMatch,
     LocationSearchResponse,
-    MatchCorrespondence,
     Point3D,
     SearchMatch,
     SearchRequest,
     SearchResponse,
 )
-from ..utils.image import from_base64
+from ..utils.image import decode_image, from_base64
 
 LOG = get_logger("georag.api")
 
@@ -53,6 +54,12 @@ def _get_search_service(request: Request) -> ImageSearchService:
     if service is None:
         raise RuntimeError("Search service не инициализирован")
     return service
+
+
+def _get_depth_generator(
+    request: Request,
+) -> DepthAnythingPointCloudGenerator | None:
+    return getattr(request.app.state, "depth_generator", None)
 
 
 @router.get("/health", summary="Проверка готовности")
@@ -178,67 +185,50 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
         )
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
-    import numpy as np
-
     point_limit = getattr(request.app.state, "point_cloud_limit", 2048)
     include_points = payload.plot_dots
-
-    def _to_points(coords: np.ndarray, scores: np.ndarray) -> list[Point3D]:
-        return [
-            Point3D(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]), score=float(score))
-            for vec, score in zip(coords, scores)
-        ]
-
-    aggregated_coords: list[np.ndarray] = []
-    aggregated_scores: list[np.ndarray] = []
     query_point_cloud: list[Point3D] = []
+    depth_generator = _get_depth_generator(request) if include_points else None
+    if include_points:
+        if depth_generator is None:
+            LOG.warning("event=depth_generator_unavailable request_id=%s", request_id)
+        else:
+            try:
+                query_image = decode_image(query_bytes)
+            except ValueError as exc:
+                LOG.warning(
+                    "event=query_decode_failed request_id=%s error=%s",
+                    request_id,
+                    exc,
+                )
+            else:
+                try:
+                    depth_points = depth_generator.generate_point_cloud(
+                        query_image,
+                        max_points=point_limit,
+                    )
+                except Exception as exc:  # pragma: no cover - обработка ошибок модели
+                    LOG.exception(
+                        "event=depth_generation_failed request_id=%s error=%s",
+                        request_id,
+                        exc,
+                    )
+                else:
+                    if point_limit > 0:
+                        depth_points = depth_points[:point_limit]
+                    query_point_cloud = [
+                        Point3D(
+                            x=pt.x,
+                            y=pt.y,
+                            z=pt.z,
+                        )
+                        for pt in depth_points
+                    ]
 
     matches: list[SearchMatch] = []
     for match in result.matches:
-        candidate_cloud: list[Point3D] = []
-        correspondences: list[MatchCorrespondence] = []
         rotation = match.match_score.relative_rotation
         translation = match.match_score.relative_translation
-
-        if include_points:
-            if match.match_score.triangulated_count:
-                tri_coords = match.match_score.triangulated_points[:point_limit]
-                tri_scores = match.match_score.triangulated_scores[:point_limit]
-                aggregated_coords.append(tri_coords)
-                aggregated_scores.append(tri_scores)
-
-                candidate_points = tri_coords
-                if rotation is not None and translation is not None:
-                    candidate_points = (
-                        rotation.astype(np.float32) @ tri_coords.T
-                        + translation.reshape(3, 1).astype(np.float32)
-                    ).T
-
-                candidate_cloud = _to_points(candidate_points, tri_scores)
-
-                for query_vec, candidate_vec, score in zip(
-                    tri_coords, candidate_points, tri_scores, strict=False
-                ):
-                    correspondences.append(
-                        MatchCorrespondence(
-                            query=Point3D(
-                                x=float(query_vec[0]),
-                                y=float(query_vec[1]),
-                                z=float(query_vec[2]),
-                                score=float(score),
-                            ),
-                            candidate=Point3D(
-                                x=float(candidate_vec[0]),
-                                y=float(candidate_vec[1]),
-                                z=float(candidate_vec[2]),
-                                score=float(score),
-                            ),
-                            score=float(score),
-                        )
-                    )
-            else:
-                _, m_coords, m_scores = match.local_features.to_point_cloud(point_limit)
-                candidate_cloud = _to_points(m_coords, m_scores)
         matches.append(
             SearchMatch(
                 image_id=match.record.id,
@@ -255,8 +245,8 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                point_cloud=candidate_cloud,
-                correspondences=correspondences,
+                point_cloud=[],
+                correspondences=[],
                 relative_rotation=(
                     rotation.reshape(-1).astype(float).tolist()
                     if rotation is not None
@@ -267,15 +257,6 @@ async def search_by_image(request: Request, payload: SearchRequest) -> SearchRes
                 ),
             )
         )
-
-    if include_points and aggregated_coords:
-        q_coords = np.concatenate(aggregated_coords, axis=0)
-        q_scores = np.concatenate(aggregated_scores, axis=0)
-        if q_coords.shape[0] > point_limit:
-            order = np.argsort(-q_scores)[:point_limit]
-            q_coords = q_coords[order]
-            q_scores = q_scores[order]
-        query_point_cloud = _to_points(q_coords, q_scores)
 
     response = SearchResponse(
         query_image_url=result.query_image_url,
@@ -324,15 +305,6 @@ async def search_by_coordinates(
 
     matches: list[LocationSearchMatch] = []
     for match in result.matches:
-        point_cloud: list[Point3D] | None = None
-        if match.local_features is not None:
-            _, coords, scores = match.local_features.to_point_cloud(
-                getattr(request.app.state, "point_cloud_limit", 2048)
-            )
-            point_cloud = [
-                Point3D(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]), score=float(score))
-                for vec, score in zip(coords, scores)
-            ]
         matches.append(
             LocationSearchMatch(
                 image_id=match.record.id,
@@ -342,7 +314,7 @@ async def search_by_coordinates(
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                point_cloud=point_cloud,
+                point_cloud=None,
             )
         )
 
@@ -394,15 +366,6 @@ async def search_by_address(
 
     matches: list[LocationSearchMatch] = []
     for match in result.matches:
-        point_cloud: list[Point3D] | None = None
-        if match.local_features is not None:
-            _, coords, scores = match.local_features.to_point_cloud(
-                getattr(request.app.state, "point_cloud_limit", 2048)
-            )
-            point_cloud = [
-                Point3D(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]), score=float(score))
-                for vec, score in zip(coords, scores)
-            ]
         matches.append(
             LocationSearchMatch(
                 image_id=match.record.id,
@@ -412,7 +375,7 @@ async def search_by_address(
                 longitude=match.record.longitude,
                 address=match.record.address,
                 metadata=match.record.metadata_json,
-                point_cloud=point_cloud,
+                point_cloud=None,
             )
         )
 

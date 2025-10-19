@@ -96,8 +96,6 @@ class LocationMatchResult:
 
     record: ImageRecord
     image_url: str
-    image_url: str
-    local_features: LocalFeatureSet | None
     distance_meters: float
 
 
@@ -478,21 +476,10 @@ class ImageSearchService:
 
         matches: list[LocationMatchResult] = []
         for record, distance in top_records:
-        for record, distance in top_records:
-            local_features: LocalFeatureSet | None = None
-            if payload.plot_dots:
-                local_features = await self._load_local_features(
-                    record.local_feature_path
-                )
-                local_features = await self._load_local_features(
-                    record.local_feature_path
-                )
             matches.append(
                 LocationMatchResult(
                     record=record,
                     image_url=self._storage.build_url(record.image_path),
-                    image_url=self._storage.build_url(record.image_path),
-                    local_features=local_features,
                     distance_meters=distance,
                 )
             )

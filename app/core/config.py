@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, FieldValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +31,16 @@ class Settings(BaseSettings):
             hosts = [item.strip() for item in value.split(",") if item.strip()]
             return hosts or None
         return value
+
+    @field_validator("depth_clip_upper_percentile")
+    @classmethod
+    def _validate_clip_percentiles(
+        cls, upper: float, info: FieldValidationInfo
+    ) -> float:
+        lower = info.data.get("depth_clip_lower_percentile")
+        if lower is not None and upper <= lower:
+            raise ValueError("DEPTH_CLIP_UPPER должно быть больше DEPTH_CLIP_LOWER")
+        return upper
 
     # PostgreSQL connection
     database_dsn: str = Field(
@@ -93,6 +103,54 @@ class Settings(BaseSettings):
     max_search_results: int = Field(default=50, alias="MAX_SEARCH_RESULTS")
     point_cloud_limit: int = Field(default=2048, alias="POINT_CLOUD_LIMIT", ge=64, le=8192)
     feature_prefetch_limit: int = Field(default=16, alias="FEATURE_PREFETCH_LIMIT", ge=1, le=128)
+    depth_model_repo: str = Field(
+        default="depth-anything/Depth-Anything-V2-Large", alias="DEPTH_MODEL_REPO"
+    )
+    depth_model_filename: str = Field(
+        default="depth_anything_v2_vitl.pth", alias="DEPTH_MODEL_FILENAME"
+    )
+    depth_sample_step: int = Field(default=4, alias="DEPTH_SAMPLE_STEP", ge=1, le=64)
+    depth_clip_enabled: bool = Field(default=True, alias="DEPTH_CLIP_ENABLED")
+    depth_clip_lower_percentile: float = Field(
+        default=0.5,
+        alias="DEPTH_CLIP_LOWER",
+        ge=0.0,
+        le=99.9,
+    )
+    depth_clip_upper_percentile: float = Field(
+        default=99.5,
+        alias="DEPTH_CLIP_UPPER",
+        ge=0.1,
+        le=100.0,
+    )
+    depth_ground_filter: bool = Field(default=True, alias="DEPTH_GROUND_FILTER")
+    depth_ground_distance: float = Field(
+        default=0.05,
+        alias="DEPTH_GROUND_DISTANCE",
+        gt=0.0,
+    )
+    depth_ground_relative_distance: bool = Field(
+        default=True,
+        alias="DEPTH_GROUND_RELATIVE_DISTANCE",
+    )
+    depth_ground_min_normal: float = Field(
+        default=0.7,
+        alias="DEPTH_GROUND_MIN_NORMAL",
+        ge=0.0,
+        le=1.0,
+    )
+    depth_ground_min_ratio: float = Field(
+        default=0.08,
+        alias="DEPTH_GROUND_MIN_RATIO",
+        ge=0.0,
+        le=1.0,
+    )
+    depth_ground_iterations: int = Field(
+        default=72,
+        alias="DEPTH_GROUND_ITERATIONS",
+        ge=1,
+        le=512,
+    )
 
     # Nominatim integration
     nominatim_user_agent: str | None = Field(

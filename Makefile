@@ -5,7 +5,7 @@ endif
 
 export PYTHONPATH := $(CURDIR)
 
-.PHONY: lint typecheck ingest bootstrap-moscow
+.PHONY: lint typecheck ingest bootstrap-moscow plot-point-cloud
 
 lint:
 	uv run ruff check app scripts
@@ -19,3 +19,11 @@ ingest:
 bootstrap-moscow:
 	@test -n "$$MAPILLARY_TOKEN" || (echo "MAPILLARY_TOKEN is required" >&2; exit 1)
 	uv run python scripts/download_moscow_mapillary.py --token "$$MAPILLARY_TOKEN" --output train_data/mapillary_moscow
+
+plot-point-cloud:
+	@test -n "$(IMAGE)" || (echo "IMAGE is required" >&2; exit 1)
+	uv run python scripts/plot_point_cloud.py "$(IMAGE)" \
+		$(if $(DEVICE),--device "$(DEVICE)",) \
+		$(if $(MAX_POINTS),--max-points $(MAX_POINTS),) \
+		$(if $(STEP),--step $(STEP),) \
+		$(if $(SAVE),--save "$(SAVE)",)

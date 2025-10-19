@@ -12,6 +12,10 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .api.routes import router as api_router
+from .application.depth_anything import (
+    DepthAnythingPointCloudGenerator,
+    GroundPlaneFilterConfig,
+)
 from .application.feature_store import FeatureStore
 from .application.features import LocalFeatureSet, SuperPointFeatureExtractor
 from .application.geocoder import Geocoder
@@ -114,6 +118,33 @@ async def lifespan(app: FastAPI):
         prefetch_limit=settings.feature_prefetch_limit,
     )
 
+    depth_generator: DepthAnythingPointCloudGenerator | None = None
+    try:
+        clip_percentiles = (
+            settings.depth_clip_lower_percentile,
+            settings.depth_clip_upper_percentile,
+        ) if settings.depth_clip_enabled else None
+        ground_config = GroundPlaneFilterConfig(
+            enabled=settings.depth_ground_filter,
+            min_normal_y=settings.depth_ground_min_normal,
+            distance_threshold=settings.depth_ground_distance,
+            min_inlier_ratio=settings.depth_ground_min_ratio,
+            max_iterations=settings.depth_ground_iterations,
+            relative_distance=settings.depth_ground_relative_distance,
+        )
+        depth_generator = DepthAnythingPointCloudGenerator(
+            repo_id=settings.depth_model_repo,
+            filename=settings.depth_model_filename,
+            device=device,
+            default_sample_step=settings.depth_sample_step,
+            clip_percentiles=clip_percentiles,
+            ground_plane_filter=ground_config,
+        )
+    except ImportError as exc:
+        LOG.warning("event=depth_generator_disabled reason=%s", exc)
+    except Exception as exc:  # pragma: no cover - инициализация может падать на GPU
+        LOG.exception("event=depth_generator_failed error=%s", exc)
+
     app.state.database = database
     app.state.storage = storage
     app.state.local_store = local_store
@@ -123,6 +154,7 @@ async def lifespan(app: FastAPI):
     app.state.search_service = search_service
     app.state.geocoder = geocoder
     app.state.point_cloud_limit = settings.point_cloud_limit
+    app.state.depth_generator = depth_generator
 
     LOG.info('event=lifespan_init message="Сервис визуальной геолокации готов"')
 
