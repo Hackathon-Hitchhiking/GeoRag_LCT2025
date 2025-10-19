@@ -208,8 +208,8 @@ print(scene.address, scene.description)
 {
   "query_image_url": "https://s3.local/georag/queries/7a8b....jpg",
   "query_point_cloud": [
-    {"x": -1.72, "y": 0.64, "z": 6.81, "score": 0.92, "r": 132, "g": 118, "b": 105},
-    {"x": -1.31, "y": -0.42, "z": 5.94, "score": 0.88, "r": 126, "g": 112, "b": 97}
+    {"x": -1.72, "y": 0.64, "z": 6.81},
+    {"x": -1.31, "y": -0.42, "z": 5.94}
   ],
   "matches": [
     {
